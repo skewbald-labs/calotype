@@ -3,8 +3,12 @@
   "name": "dev.calotype/screenshot",
   "title": "Calotype",
   "description": "Let your AI agent see any public web page: one screenshot tool, returns the page as an image.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "websiteUrl": "https://calotype.dev/docs#mcp",
+  "repository": {
+    "url": "https://github.com/skewbald-labs/calotype",
+    "source": "github"
+  },
   "icons": [
     {
       "src": "https://calotype.dev/icon.svg",

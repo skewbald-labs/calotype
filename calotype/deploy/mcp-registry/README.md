@@ -16,4 +16,4 @@ Domain proof: a TXT record on `calotype.dev`, `v=MCPv1; k=ed25519; p=...`, in th
 `calotype-dev` Cloud DNS zone. Its private key (hex) is kept in
 the operator's secret store. To publish a new version, bump `version` here and in
 `calotype/__init__.py`, then from this directory, with HOME and TMPDIR pointed at a scratch folder:
-`mcp-publisher login dns --domain calotype.dev --private-key <hex>` and `mcp-publisher publish`.
+`MCP_DNS_KEY_FILE=<file holding the hex key> python publish.py server.json`. (`mcp-publisher login dns --private-key <hex>` works too, but puts the key in the process list.)
