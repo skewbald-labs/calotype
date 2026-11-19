@@ -1,0 +1,146 @@
+  <h1>Pricing</h1>
+  <p class="lede">Three plans, all with every parameter. You pay for successful screenshots only.</p>
+
+  <!-- Prices: source of truth is calotype/plans.json; Stripe prices calotype_starter_monthly and calotype_pro_monthly. -->
+  <div class="plans">
+    <div class="plan">
+      <h3>Free</h3>
+      <div class="price">$0 <small>/ month</small></div>
+      <ul><li>100 screenshots a month</li><li>All parameters</li><li>No account, email or card</li></ul>
+    </div>
+    <div class="plan">
+      <h3>Starter</h3>
+      <div class="price">$19 <small>/ month</small></div>
+      <ul><li>5,000 screenshots a month</li><li>All parameters</li><li>Cancel any time</li></ul>
+    </div>
+    <div class="plan">
+      <h3>Pro</h3>
+      <div class="price">$49 <small>/ month</small></div>
+      <ul><li>25,000 screenshots a month</li><li>All parameters</li><li>Cancel any time</li></ul>
+    </div>
+  </div>
+  <p class="muted">Prices are in US dollars, per key, per month.</p>
+
+<!--sale-->  <div class="notice">
+    <strong>Paid plans are on sale.</strong> Upgrade your existing key <a href="#upgrade">below</a>: it keeps working, with the new quota. Prices do not include sales tax. Where Calotype must collect it, Stripe adds it at checkout and shows it before you pay. The <a href="/terms">terms</a> and <a href="/refunds">refund policy</a> apply. Questions go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.
+  </div><!--/sale--><!--nosale-->
+  <div class="notice">
+    <strong>Paid plans open soon.</strong> Free keys work now: 100 screenshots a month, with no sign-up and no card. If you need more than that, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a> with how many you need a month, and you will hear the day Starter and Pro open.
+  </div>
+<!--/nosale-->
+
+  <h2 id="counting">What counts as a screenshot</h2>
+  <p>One capture that returns an image counts as one screenshot, whatever its size or format. A full-page capture is one screenshot. A call through the <a href="/docs#mcp">MCP server</a> is one API call and counts the same way.</p>
+  <p>These are not counted:</p>
+  <ul>
+    <li>failed captures: a page that cannot be reached, a timeout, a page over the download limit, a busy server, an error on Calotype's side;</li>
+    <li>rejected requests: bad parameters, a missing or wrong key, an address Calotype will not fetch, a key over its limit;</li>
+    <li>calls that are not screenshots: <code>/v1/usage</code>, <code>/v1/plans</code>, key creation.</li>
+  </ul>
+  <p>A page that loads but answers with an error status, such as a <code>404</code> page, is still captured and does count. The <code>X-Calotype-Target-Status</code> header shows the status.</p>
+
+  <h2 id="reset">The monthly reset</h2>
+  <p>Counts run per key per calendar month, in UTC, and reset to zero at 00:00 UTC on the first day of each month. This follows the calendar, not your billing date. Unused screenshots do not carry over. <code>GET /v1/usage</code> shows the count and the reset time, and every screenshot carries an <code>X-Calotype-Usage</code> header such as <code>12/100</code>.</p>
+  <p>When a key reaches its limit, screenshot calls answer <code>429 quota_exceeded</code> until the reset. Nothing is charged beyond the plan's price: there are no overage fees.</p>
+
+  <h2 id="upgrade">Upgrade</h2>
+<!--nosale-->
+  <p>Paid plans are not on sale yet. Free keys need no upgrade: they keep working, and when Starter and Pro open, the same key moves to the new plan here. To hear the day they open, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
+<!--/nosale--><!--sale-->
+  <p>Paste the free key you already have and pick a plan. Payment happens on Stripe's checkout page; Calotype never sees your card. The same key moves to the new plan as soon as Stripe confirms the payment, so nothing in your code changes. This month's count comes with it: a key that has used 80 free screenshots has 4,920 left on Starter.</p>
+  <form id="upgrade-form" class="upgrade" method="post" autocomplete="off">
+    <label for="upgrade-key">Your API key</label>
+    <input id="upgrade-key" name="key" type="password" placeholder="cal_..." spellcheck="false" autocapitalize="off" required>
+    <fieldset>
+      <legend>Plan</legend>
+      <label><input type="radio" name="plan" value="starter" checked> Starter, $19 a month, 5,000 screenshots</label>
+      <label><input type="radio" name="plan" value="pro"> Pro, $49 a month, 25,000 screenshots</label>
+    </fieldset>
+    <div class="actions">
+      <button id="upgrade-go" type="submit">Continue to checkout</button>
+      <button id="upgrade-portal" class="secondary" type="button">Manage or cancel a paid plan</button>
+    </div>
+    <p id="upgrade-status" class="status" role="status" aria-live="polite"></p>
+  </form>
+  <p class="muted">Your key is sent only to this server, over the same connection as your API calls, and is not kept in the browser. Stripe gets the key's internal number, never the key. Until checkout opens, this form answers that card checkout is not set up.</p>
+
+<!--/sale-->
+  <h2 id="change">Change or cancel</h2>
+<!--nosale-->
+  <p>No paid plans are on sale yet, so there is nothing to change or cancel. A free key needs no account and can simply be left unused.</p>
+<!--/nosale--><!--sale-->
+  <p>"Manage or cancel a paid plan" above opens Stripe's customer portal for your key. There you can:</p>
+  <ul>
+    <li><strong>Switch between Starter and Pro.</strong> The key's limit changes as soon as Stripe confirms the switch. Stripe prorates the price: the unused part of the old plan is credited and the new plan is charged for the rest of the period, settled on your next invoice.</li>
+    <li><strong>Cancel.</strong> The plan stays until the end of the month you have paid for, and is not renewed. Then the key goes back to the free plan and keeps working, with 100 screenshots a month.</li>
+    <li><strong>Change your card and see your invoices.</strong></li>
+  </ul>
+  <p>If a renewal payment fails, the key keeps its plan while Stripe retries the card. If Stripe cannot collect it, the subscription ends and the key goes back to the free plan.</p>
+<!--/sale-->
+  <p>Refunds are covered by the <a href="/refunds">refund policy</a>. For a higher limit than Pro, or any question about pricing, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>. Skewbald, the AI agent that runs Calotype, reads and answers that inbox.</p>
+
+<!--sale--><script>
+  // Upgrade: send the key to this server, which starts a Stripe Checkout and
+  // returns its address. The key is never put in a URL or stored.
+  (function () {
+    var form = document.getElementById("upgrade-form");
+    var keyInput = document.getElementById("upgrade-key");
+    var go = document.getElementById("upgrade-go");
+    var portal = document.getElementById("upgrade-portal");
+    var status = document.getElementById("upgrade-status");
+
+    var params = new URLSearchParams(location.search);
+    if (params.get("checkout") === "success") {
+      status.textContent = "Payment received. Your key moves to the new plan within a minute; GET /v1/usage shows the plan.";
+    } else if (params.get("checkout") === "cancelled") {
+      status.textContent = "Checkout was cancelled. Nothing was charged.";
+    }
+
+    function send(method, path, body, busy) {
+      var key = keyInput.value.trim();
+      status.classList.remove("error");
+      if (!key) {
+        status.classList.add("error");
+        status.textContent = "Paste your API key first.";
+        keyInput.focus();
+        return;
+      }
+      go.disabled = true;
+      portal.disabled = true;
+      status.textContent = busy;
+      var opts = { method: method, headers: { "Accept": "application/json", "Authorization": "Bearer " + key } };
+      if (body) {
+        opts.headers["Content-Type"] = "application/json";
+        opts.body = JSON.stringify(body);
+      }
+      fetch(path, opts)
+        .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+        .then(function (res) {
+          if (res.ok && res.body && typeof res.body.url === "string" && res.body.url.indexOf("https://") === 0) {
+            keyInput.value = "";
+            location.assign(res.body.url);
+            return;
+          }
+          status.classList.add("error");
+          status.textContent = (res.body && res.body.error && res.body.error.message) || "Something went wrong. Try again in a moment.";
+          go.disabled = false;
+          portal.disabled = false;
+        })
+        .catch(function () {
+          status.classList.add("error");
+          status.textContent = "The server could not be reached. Try again in a moment.";
+          go.disabled = false;
+          portal.disabled = false;
+        });
+    }
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var picked = form.querySelector('input[name="plan"]:checked');
+      send("POST", "/v1/billing/checkout", { plan: picked ? picked.value : "starter" }, "Opening checkout...");
+    });
+    portal.addEventListener("click", function () {
+      send("GET", "/v1/billing/portal", null, "Opening the billing portal...");
+    });
+  })();
+</script><!--/sale-->

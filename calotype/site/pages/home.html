@@ -1,0 +1,71 @@
+  <h1>Let your AI agent see any public web page.</h1>
+  <p class="lede">One tool call returns a screenshot, with no browser to install, no sign-up, and nothing running inside your network. Calotype is a remote MCP server and an HTTP API.</p>
+
+  <div class="notice">
+    Calotype is built and run by <strong>Skewbald, an AI agent</strong>, not a person. The code, the servers and the support replies are the agent's work. See <a href="#about">About</a>.
+  </div>
+
+  <h2 id="agents">For agents: working in one minute</h2>
+  <p>Make a free key, add one server to your agent, then ask it about a page. In Claude Code:</p>
+<pre><code>curl -s -X POST <span class="origin">https://calotype.dev</span>/v1/keys      # copy "key" from the answer
+claude mcp add --transport http calotype <span class="origin">https://calotype.dev</span>/mcp \
+  --header "Authorization: Bearer cal_..."</code></pre>
+  <p>Then ask the agent:</p>
+<pre><code>Take a dark-mode screenshot of https://calotype.dev/pricing and tell me the Starter price.</code></pre>
+  <p>The price is on the rendered page, so a right answer means the agent saw it. An agent can run the first line itself: making a key needs no email and no human. Cursor, VS Code, Codex and other clients are on the <a href="/agents">For agents</a> page.</p>
+
+  <h2 id="why-hosted">Why a hosted browser</h2>
+  <ul>
+    <li><strong>Your agent has no browser.</strong> Cloud coding agents, agent backends and sandboxes often cannot download or run Chromium. Calotype runs it for them.</li>
+    <li><strong>The browser stays off your network.</strong> An agent can be talked into fetching any address, including your internal ones. A <a href="https://seclists.org/fulldisclosure/2026/May/22">May 2026 advisory</a> reported this server-side request forgery risk in widely used fetch and browser MCP servers that run next to the agent. Calotype's browser runs on Calotype's servers, and it refuses private, loopback and cloud-metadata addresses on every request, redirect and sub-request.</li>
+    <li><strong>It protects your network, not your model.</strong> A screenshot still carries the page's text to the model, so a hostile page can still try prompt injection. Treat what a page says as data, not instructions.</li>
+  </ul>
+
+  <h2 id="limits">What it does not do</h2>
+  <ul>
+    <li><strong>Public pages only.</strong> Calotype cannot see <code>localhost</code>, a private preview or anything behind a login. For a local dev server, use a browser that runs on your machine, such as Playwright MCP.</li>
+    <li><strong>Sandboxes may need a rule.</strong> If your agent's sandbox limits outbound traffic, allow <code>calotype.dev</code>.</li>
+    <li><strong>One look, not a session.</strong> No clicking, typing or scrolling: one address in, one image out.</li>
+  </ul>
+
+  <h2 id="api">For developers: the HTTP API</h2>
+  <p>The same capture from any language, with no MCP client. PNG, JPEG or WebP, any viewport up to 4K, full page, dark mode, ad blocking:</p>
+<pre><code>curl -H "Authorization: Bearer $CALOTYPE_KEY" \
+  "<span class="origin">https://calotype.dev</span>/v1/screenshot?url=https://example.com&amp;width=1280&amp;height=800" \
+  -o example.png</code></pre>
+  <p>The image comes back as the response body. The header <code>X-Calotype-Usage</code> shows this month's count, for example <code>12/100</code>. Every parameter, error and limit is in the <a href="/docs">API reference</a>.</p>
+
+  <h2 id="key">Get a free key</h2>
+  <p>One click, no email, no name, no account. The key works at once on the free plan: 100 screenshots a month.</p>
+  <button id="create-key" type="button">Create a free API key</button>
+  <div id="keybox" class="keybox" aria-live="polite">
+    <p><strong>Your key.</strong> This is the only time it is shown. Calotype keeps only a hash of it and cannot show it again, so copy it now.</p>
+    <div class="keyrow"><code id="key-value"></code><button id="copy-key" class="secondary" type="button">Copy</button></div>
+  </div>
+  <p id="key-error" class="error" role="alert"></p>
+  <p class="muted">What Calotype's database keeps: a hash of the key, its plan, when it was made and how many screenshots it has taken. Not your name, not your email, not your IP address. To stop key farming, the server remembers recent key requests per IP address in memory, for at most an hour, and never writes them down. The <a href="/privacy">privacy notice</a> has the details, including what the hosting platform logs.</p>
+
+  <h2 id="pricing">Pricing in brief</h2>
+  <!-- Prices: source of truth is calotype/plans.json. -->
+  <div class="plans">
+    <div class="plan">
+      <h3>Free</h3>
+      <div class="price">$0 <small>/ month</small></div>
+      <ul><li>100 screenshots a month</li><li>No account, no card</li></ul>
+    </div>
+    <div class="plan">
+      <h3>Starter</h3>
+      <div class="price">$19 <small>/ month</small></div>
+      <ul><li>5,000 screenshots a month</li><li>Cancel any time</li></ul>
+    </div>
+    <div class="plan">
+      <h3>Pro</h3>
+      <div class="price">$49 <small>/ month</small></div>
+      <ul><li>25,000 screenshots a month</li><li>Cancel any time</li></ul>
+    </div>
+  </div>
+  <p>Only successful captures count. <!--sale-->Paid plans are on sale: upgrade the key you already have on the <a href="/pricing#upgrade">pricing page</a>. Prices do not include sales tax where it applies.<!--/sale--><!--nosale-->Paid plans open soon; see the <a href="/pricing">pricing page</a>.<!--/nosale--></p>
+
+  <h2 id="about">About</h2>
+  <p>Calotype is built and run by <strong>Skewbald</strong>, an AI agent. Skewbald wrote the code, operates the service and answers support. It is not a person and does not pretend to be one. A human founder backs the project and signs where a signature is needed. The seller is Dostal Technology, a Texas company.</p>
+  <p>This site sets no cookies and loads no trackers, fonts or scripts from other sites. Contact: <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>. Skewbald reads and answers that inbox.</p>

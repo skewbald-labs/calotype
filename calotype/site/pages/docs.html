@@ -1,0 +1,202 @@
+  <h1>API reference</h1>
+  <p class="lede">Everything the Calotype API does, its limits and its errors. The machine-readable version is at <a href="/openapi.json"><code>/openapi.json</code></a>.</p>
+
+  <ol class="toc">
+    <li><a href="#basics">Basics</a></li>
+    <li><a href="#auth">Authentication</a></li>
+    <li><a href="#keys">Create a key</a></li>
+    <li><a href="#screenshot">Take a screenshot</a></li>
+    <li><a href="#parameters">Parameters</a></li>
+    <li><a href="#response">The response</a></li>
+    <li><a href="#safety">What Calotype will not fetch</a></li>
+    <li><a href="#errors">Errors</a></li>
+    <li><a href="#limits">Quotas and rate limits</a></li>
+    <li><a href="#usage">Usage, plans and health</a></li>
+    <li><a href="#mcp">MCP server for AI agents</a></li>
+    <li><a href="#billing">Billing endpoints</a></li>
+  </ol>
+
+  <h2 id="basics">Basics</h2>
+  <p>The API lives at <code><span class="origin">https://calotype.dev</span></code>. A successful screenshot returns the image itself. Everything else returns JSON. Errors always have the same shape:</p>
+<pre><code>{"error": {"code": "quota_exceeded", "message": "...", ...}}</code></pre>
+  <p>The <code>code</code> is stable and meant for programs; the <code>message</code> is meant for people. Some errors add fields, listed under <a href="#errors">Errors</a>. Every response carries an <code>X-Request-Id</code> header; quote it when you write to support.</p>
+
+  <h2 id="auth">Authentication</h2>
+  <p>Every call except key creation, <code>/v1/plans</code>, <code>/health</code> and Stripe's webhook needs an API key. Send it in one of two ways:</p>
+  <ul>
+    <li>a header: <code>Authorization: Bearer cal_...</code> (preferred);</li>
+    <li>a query parameter: <code>?access_key=cal_...</code>.</li>
+  </ul>
+  <p>Prefer the header. A key in the query string is part of the request address, which travels through more systems than a header does. Calotype drops the hosting platform's request records before they are stored (see <a href="/privacy#platform">Privacy</a>), but the header is still the safer habit. Calotype's own logs never contain the key. An <code>Authorization</code> header that is not a bearer token is refused, even if <code>access_key</code> is also set. The <a href="#mcp">MCP endpoint</a> takes the header only.</p>
+  <p>The key is the account. Calotype stores only its SHA-256 hash, so a lost key cannot be shown again.</p>
+
+  <h2 id="keys">Create a key</h2>
+  <p><code>POST /v1/keys</code> makes a free-plan key. It takes no body and no authentication, and asks for nothing about you. The <a href="/#key">button on the home page</a> calls it.</p>
+<pre><code>curl -X POST <span class="origin">https://calotype.dev</span>/v1/keys</code></pre>
+  <p>It answers <code>201</code>:</p>
+<pre><code>{
+  "key": "cal_...",
+  "plan": "free",
+  "monthly_quota": 100,
+  "message": "This is the only time the key is shown. Calotype stores only its hash and cannot recover it."
+}</code></pre>
+  <p>Key creation is rate limited; see <a href="#limits">Quotas and rate limits</a>.</p>
+
+  <h2 id="screenshot">Take a screenshot</h2>
+  <p><code>GET /v1/screenshot</code> with the parameters in the query string:</p>
+<pre><code>curl -H "Authorization: Bearer $CALOTYPE_KEY" \
+  "<span class="origin">https://calotype.dev</span>/v1/screenshot?url=https://example.com&amp;width=1280&amp;height=800" \
+  -o example.png</code></pre>
+  <p>Or <code>POST /v1/screenshot</code> with a JSON object as the body:</p>
+<pre><code>curl -X POST "<span class="origin">https://calotype.dev</span>/v1/screenshot" \
+  -H "Authorization: Bearer $CALOTYPE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "full_page": true, "format": "webp"}' \
+  -o example.webp</code></pre>
+  <p>POST keeps the target address out of the request line. With POST, send the key in the header (or as <code>?access_key=</code>); an <code>access_key</code> field in the JSON body is ignored.</p>
+
+  <h2 id="parameters">Parameters</h2>
+  <p>The same names work in the query string and in the JSON body. A parameter Calotype does not know is refused with <code>invalid_parameters</code>, so typos do not pass silently. In the query string, write booleans as <code>true</code> or <code>false</code>.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th>Default</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>url</code></td><td>required</td><td>The page to capture. <code>http</code> or <code>https</code> only, on a public address, at most 2,048 characters. Ports 80, 443 and 1024 and up. No <code>user:password@</code> in the address.</td></tr>
+      <tr><td><code>width</code></td><td>1280</td><td>Viewport width in CSS pixels, 100 to 3840.</td></tr>
+      <tr><td><code>height</code></td><td>800</td><td>Viewport height in CSS pixels, 100 to 2160.</td></tr>
+      <tr><td><code>full_page</code></td><td>false</td><td>Capture the whole scrolling page instead of the viewport. See the height cap below.</td></tr>
+      <tr><td><code>format</code></td><td>png</td><td><code>png</code>, <code>jpeg</code> or <code>webp</code>. <code>jpg</code> is accepted as <code>jpeg</code>.</td></tr>
+      <tr><td><code>quality</code></td><td>80</td><td>1 to 100, for <code>jpeg</code> and <code>webp</code> only. Sending it with <code>png</code> is an error.</td></tr>
+      <tr><td><code>device_scale_factor</code></td><td>1</td><td>1 to 3, decimals allowed. Use 2 for sharp images on high-density screens.</td></tr>
+      <tr><td><code>delay_ms</code></td><td>0</td><td>Extra wait after the page loads, 0 to 10,000 ms.</td></tr>
+      <tr><td><code>wait_until</code></td><td>load</td><td>When the page counts as loaded: <code>load</code>, <code>domcontentloaded</code>, <code>networkidle</code> or <code>commit</code>.</td></tr>
+      <tr><td><code>block_ads</code></td><td>false</td><td>Block requests to a list of common ad and tracking domains.</td></tr>
+      <tr><td><code>dark_mode</code></td><td>false</td><td>Ask the page for its dark colour scheme (<code>prefers-color-scheme: dark</code>).</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>Size limits</h3>
+  <ul>
+    <li><code>width</code> &times; <code>height</code> &times; <code>device_scale_factor</code>&sup2; may be at most 80,000,000 pixels.</li>
+    <li>A full-page capture is at most 20,000 CSS pixels tall, and less where the 80,000,000-pixel limit bites first (wide viewports, high scale factors). WebP images cannot be taller than 16,383 pixels, so for <code>webp</code> the cap is 16,383 divided by the scale factor. A page taller than the cap is cut off at the cap; that is not an error.</li>
+  </ul>
+
+  <h2 id="response">The response</h2>
+  <p>A successful call answers <code>200</code> with the image as the body and its type in <code>Content-Type</code> (<code>image/png</code>, <code>image/jpeg</code> or <code>image/webp</code>). Headers:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Header</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>X-Calotype-Usage</code></td><td>Screenshots this key has used this month, and its limit, for example <code>12/100</code>.</td></tr>
+      <tr><td><code>X-Calotype-Duration-Ms</code></td><td>How long the capture took.</td></tr>
+      <tr><td><code>X-Calotype-Target-Status</code></td><td>The HTTP status the page answered with. A page that answers <code>404</code> or <code>500</code> is still captured, and still counts; check this header if that matters to you.</td></tr>
+      <tr><td><code>X-Calotype-Truncated</code></td><td><code>1</code> when the page passed the 50 MB download limit and the image shows what had loaded by then.</td></tr>
+      <tr><td><code>X-Request-Id</code></td><td>On every response. Quote it to support.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Images are sent with <code>Cache-Control: no-store</code>. Calotype keeps no copy: the image exists only in the response.</p>
+
+  <h2 id="safety">What Calotype will not fetch</h2>
+  <p>Calotype only captures public web pages. It refuses private, loopback, link-local, carrier-grade NAT, multicast, reserved and cloud-metadata addresses, and host names such as <code>localhost</code> or names ending in <code>.internal</code> or <code>.local</code>. A host name must resolve to public addresses only; if any address it resolves to is private, the request is refused.</p>
+  <p>The check covers more than the first address. Every request the page makes goes through the same rule: redirects, images, scripts, frames, <code>fetch</code> calls and WebSockets. The browser's only route to the network is a proxy that resolves each host itself and connects to the exact address it checked, so a DNS answer cannot change in between. Non-web schemes such as <code>file:</code>, <code>ftp:</code> and <code>chrome:</code> are refused, as the address to capture and inside the page.</p>
+  <p>Each capture runs in a fresh browser context that is thrown away afterwards, with service workers and downloads off; nothing from one capture is visible to the next. Pages with an invalid HTTPS certificate fail to load. A page may download at most 50 MB in total. Each capture has 30 seconds from start to finish.</p>
+  <p>Please capture only pages you are allowed to view. The <a href="/acceptable-use">acceptable use policy</a> has the rules.</p>
+
+  <h2 id="errors">Errors</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>400</td><td><code>invalid_parameters</code></td><td>A parameter is missing, unknown, out of range, or in a combination that is not allowed. <code>details</code> lists each problem field when there is one.</td></tr>
+      <tr><td>400</td><td><code>invalid_json</code></td><td>The POST body is not a JSON object.</td></tr>
+      <tr><td>400</td><td><code>invalid_url</code></td><td>The address cannot be parsed, is too long, has no host, has credentials in it, contains spaces, control characters or backslashes, or has a port outside 1 to 65535.</td></tr>
+      <tr><td>400</td><td><code>invalid_scheme</code></td><td>The address is not <code>http</code> or <code>https</code>.</td></tr>
+      <tr><td>400</td><td><code>blocked_target</code></td><td>The host is private, local or reserved, or the port is not allowed.</td></tr>
+      <tr><td>400</td><td><code>dns_error</code></td><td>The host name did not resolve, or not in time.</td></tr>
+      <tr><td>401</td><td><code>missing_key</code></td><td>No key was sent.</td></tr>
+      <tr><td>401</td><td><code>invalid_key</code></td><td>The key is wrong or revoked, or the <code>Authorization</code> header is not a bearer token.</td></tr>
+      <tr><td>403</td><td><code>plan_unavailable</code></td><td>The key's plan no longer exists. Write to support.</td></tr>
+      <tr><td>403</td><td><code>self_serve_disabled</code></td><td>Self-serve key creation is switched off.</td></tr>
+      <tr><td>422</td><td><code>target_unreachable</code></td><td>The page could not be loaded: connection refused, certificate error and so on. The message may name the browser's error, such as <code>net::ERR_NAME_NOT_RESOLVED</code>.</td></tr>
+      <tr><td>422</td><td><code>blocked_target</code></td><td>The page, a redirect or the final address pointed to a private address or a non-web scheme.</td></tr>
+      <tr><td>422</td><td><code>page_too_large</code></td><td>The page passed the 50 MB download limit before anything could be captured.</td></tr>
+      <tr><td>429</td><td><code>quota_exceeded</code></td><td>The key has used its screenshots for the month. Adds <code>plan</code>, <code>limit</code>, <code>used</code> and <code>resets_at</code>.</td></tr>
+      <tr><td>429</td><td><code>rate_limited</code></td><td>Too many keys were created recently. Adds <code>retry_after_s</code>, and the <code>Retry-After</code> header.</td></tr>
+      <tr><td>500</td><td><code>internal_error</code></td><td>Something failed on Calotype's side.</td></tr>
+      <tr><td>503</td><td><code>busy</code></td><td>Every renderer stayed busy for 10 seconds. Retry after the <code>Retry-After</code> header (5 seconds).</td></tr>
+      <tr><td>504</td><td><code>timeout</code></td><td>The page did not load, or the capture did not finish, within 30 seconds.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>A screenshot that fails, for any of these reasons, is not counted against your quota. The billing endpoints have errors of their own, listed under <a href="#billing">Billing endpoints</a>.</p>
+
+  <h2 id="limits">Quotas and rate limits</h2>
+  <ul>
+    <li><strong>Monthly quota.</strong> Each key may take as many successful screenshots a month as its plan allows: Free 100, Starter 5,000, Pro 25,000. Months are calendar months in UTC; counts reset at 00:00 UTC on the first day of each month. Unused screenshots do not carry over.</li>
+    <li><strong>What counts.</strong> Only a capture that returns an image. Rejected requests (bad parameters, bad key, refused address, over quota) and failed captures (unreachable page, timeout, busy, internal error) are not counted.</li>
+    <li><strong>Over the limit.</strong> Calls answer <code>429 quota_exceeded</code> until the reset. There are no overage charges.</li>
+    <li><strong>Key creation.</strong> At most 3 keys an hour from one IP address, and at most 200 an hour across the whole service. Over either limit, <code>POST /v1/keys</code> answers <code>429 rate_limited</code> with <code>Retry-After</code>.</li>
+    <li><strong>Concurrency.</strong> Each server renders a few pages at a time. A request that waits more than 10 seconds for a free renderer answers <code>503 busy</code>.</li>
+    <li><strong>Time.</strong> 30 seconds per capture, from start to encoded image.</li>
+  </ul>
+
+  <h2 id="usage">Usage, plans and health</h2>
+  <h3><code>GET /v1/usage</code></h3>
+  <p>Your key's plan and this month's count. It needs the key and does not count as a screenshot.</p>
+<pre><code>{"plan": "free", "month": "2026-11", "used": 12, "limit": 100, "resets_at": "2026-12-01T00:00:00Z", "key_ref": "3f9a0c71b2de"}</code></pre>
+  <p><code>key_ref</code> names your key without giving it away: quote it when you write to support, and never send the key itself.</p>
+  <h3><code>GET /v1/plans</code></h3>
+  <p>The plans, their monthly quotas and prices in US dollars. No key needed. <code>provisional</code> is <code>true</code> only on a server where paid plans are not on sale.</p>
+<pre><code>{"provisional": false, "plans": [{"name": "free", "title": "Free", "monthly_quota": 100, "price_usd": 0.0}, ...]}</code></pre>
+  <h3><code>GET /health</code></h3>
+  <p>Answers <code>200</code> with <code>{"status": "ok", "version": "...", "browser": true}</code>, or <code>503</code> with <code>"status": "degraded"</code> when the renderer's browser is down.</p>
+
+  <h2 id="mcp">MCP server</h2>
+  <p>Calotype is also a remote MCP server, so an AI agent or coding assistant can look at a web page itself. There is nothing to install: point your MCP client at the address below and send your key in a header.</p>
+  <ul>
+    <li>Address: <code><span class="origin">https://calotype.dev</span>/mcp</code></li>
+    <li>Transport: streamable HTTP</li>
+    <li>Header: <code>Authorization: Bearer cal_...</code></li>
+  </ul>
+  <p>In Claude Code:</p>
+<pre><code>claude mcp add --transport http calotype <span class="origin">https://calotype.dev</span>/mcp \
+  --header "Authorization: Bearer cal_..."</code></pre>
+  <p>In a client configured with JSON, such as a project's <code>.mcp.json</code>:</p>
+<pre><code>{
+  "mcpServers": {
+    "calotype": {
+      "type": "http",
+      "url": "<span class="origin">https://calotype.dev</span>/mcp",
+      "headers": {"Authorization": "Bearer cal_..."}
+    }
+  }
+}</code></pre>
+  <p>Other clients that take a server URL and custom headers need the same three things: the address, the HTTP transport, and the <code>Authorization</code> header. Get a key with the <a href="/#key">button on the home page</a>; it is free and asks for nothing.</p>
+  <h3>The <code>screenshot</code> tool</h3>
+  <p>One tool, <code>screenshot</code>, marked read-only. It takes <code>url</code> (required), <code>full_page</code>, <code>width</code>, <code>height</code>, <code>format</code>, <code>dark_mode</code> and <code>block_ads</code>, with the same meanings and limits as the <a href="#parameters">API's parameters</a>. Two defaults differ from the API's: <code>format</code> is <code>jpeg</code> and <code>block_ads</code> is <code>true</code>, which keeps images small for a model. It returns the image, and a line of text with the page's address after any redirects, the image's size, and the key's count for the month.</p>
+  <p>Each tool call goes through the same checks as <code>/v1/screenshot</code>: the same <a href="#safety">refusal of private addresses</a>, the same <a href="#limits">quota</a>, and the same rule that only a capture that returns an image counts. A refused address, a page that fails to load or a used-up quota comes back as a tool error that starts with the <a href="#errors">error code</a>, such as <code>quota_exceeded: ...</code>, so the agent can read it.</p>
+  <p>Without a key, a client can still connect and list the tool, so directories and inspectors can see it; calling the tool then answers a tool error saying how to get a free key, and captures nothing. A wrong or revoked key answers HTTP <code>401</code> with a JSON-RPC error saying how to get a key. The key is read from the <code>Authorization</code> header only, never from the address. The endpoint is stateless and answers <code>POST</code> only; <code>GET</code> and <code>DELETE</code> answer <code>405</code>. It speaks MCP protocol versions 2024-11-05 through 2025-11-25 over the <code>initialize</code> handshake, and 2026-07-28.</p>
+
+  <h2 id="billing">Billing endpoints</h2>
+  <p>These endpoints let a key buy a paid plan, and manage it afterwards. The <a href="/pricing#upgrade">upgrade form</a> on the pricing page uses them. A self-hosted copy without Stripe set up answers <code>503 billing_unavailable</code>.</p>
+  <h3><code>POST /v1/billing/checkout</code></h3>
+  <p>With a free key and a body of <code>{"plan": "starter"}</code> or <code>{"plan": "pro"}</code>, answers <code>{"url": "https://checkout.stripe.com/...", "plan": "starter"}</code>. Send the buyer to that address. When Stripe confirms the payment, the same key moves to the new plan; nothing in your code changes. Stripe is given the key's internal number, never the key.</p>
+  <h3><code>GET /v1/billing/portal</code></h3>
+  <p>With a key that has paid before, answers <code>{"url": "https://billing.stripe.com/..."}</code>: a Stripe customer-portal page to change the card or plan, see invoices, or cancel.</p>
+  <h3><code>POST /v1/billing/webhook</code></h3>
+  <p>For Stripe only. It checks Stripe's signature and takes no API key.</p>
+  <h3>Billing errors</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>400</td><td><code>invalid_plan</code></td><td>The plan is not one that can be bought. Adds <code>plans</code>, the ones that can.</td></tr>
+      <tr><td>400</td><td><code>invalid_json</code></td><td>The body is not a JSON object.</td></tr>
+      <tr><td>404</td><td><code>no_billing_account</code></td><td>The portal was asked for a key that has never paid.</td></tr>
+      <tr><td>409</td><td><code>already_subscribed</code></td><td>The key is already on a paid plan. Use the portal to change it.</td></tr>
+      <tr><td>502</td><td><code>billing_error</code></td><td>Stripe could not be reached or refused. Try again shortly.</td></tr>
+      <tr><td>503</td><td><code>billing_unavailable</code></td><td>Card checkout is not set up on this server.</td></tr>
+    </tbody>
+  </table>
+  </div>

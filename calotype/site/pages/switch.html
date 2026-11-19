@@ -1,0 +1,106 @@
+  <h1>Switching to Calotype</h1>
+  <p class="lede">Calotype does one job: a public page address goes in, an image of the page comes back, by HTTP or as one MCP tool call. This page maps other screenshot APIs' parameters to Calotype's and compares prices. It also says where other services do more.</p>
+
+  <ul class="toc">
+    <li><a href="#fit">Is it a fit?</a></li>
+    <li><a href="#prices">Prices per 1,000</a></li>
+    <li><a href="#params">Parameter names</a></li>
+    <li><a href="#example">One request, converted</a></li>
+    <li><a href="#differences">Differences that bite</a></li>
+    <li><a href="#more">Where others do more</a></li>
+    <li><a href="#playwright">Calotype or Playwright?</a></li>
+    <li><a href="#feedback">Tell us what is missing</a></li>
+  </ul>
+
+  <h2 id="fit">Is it a fit?</h2>
+  <p>Calotype fits when:</p>
+  <ul>
+    <li>the pages are public, and one image of each is enough;</li>
+    <li>an AI agent needs to see pages, and it has no browser of its own;</li>
+    <li>the agent should be able to get started alone: a free key comes from one <code>POST /v1/keys</code>, with no account, email or card;</li>
+    <li>the MCP client takes a header but not OAuth. Calotype's remote MCP server takes a bearer key.</li>
+  </ul>
+  <p>Calotype does not fit when you need PDF, HTML input, video, Markdown, cookies or headers for logged-in pages, proxies, element capture, or pages on a private network. Stay with a service that has them. The list is <a href="#more">below</a>.</p>
+
+  <h2 id="prices">Prices per 1,000 screenshots</h2>
+  <p>Each service's first paid plan, billed monthly, in US dollars. Calotype read these figures from each seller's own page on 19 November 2026. Prices change, so check the linked page before you decide.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Service</th><th>First paid plan</th><th>Per 1,000</th><th>Free use</th></tr></thead>
+    <tbody>
+      <tr><td><a href="/pricing">Calotype</a></td><td>$19 a month, 5,000</td><td>$3.80</td><td>100 a month, no account</td></tr>
+      <tr><td><a href="https://allscreenshots.com/pricing">Allscreenshots</a></td><td>$10 a month, 2,500</td><td>$4.00</td><td>100 once (lifetime credits)</td></tr>
+      <tr><td><a href="https://apiflash.com/">ApiFlash</a></td><td>$7 a month, 1,000</td><td>$7.00</td><td>100 a month</td></tr>
+      <tr><td><a href="https://screenshotapi.net/pricing">ScreenshotAPI.net</a></td><td>$15 a month, 2,000 credits</td><td>$7.50</td><td>100 credits a month</td></tr>
+      <tr><td><a href="https://screenshotone.com/pricing/">ScreenshotOne</a></td><td>$17 a month, 2,000</td><td>$8.50</td><td>100 a month</td></tr>
+      <tr><td><a href="https://urlbox.com/pricing">Urlbox</a></td><td>$19 a month, 2,000 (Lo-Fi, which Urlbox describes as for sites you own); $49 a month, 5,000 (Hi-Fi)</td><td>$9.50; $9.80</td><td>No free plan; 7-day trial on Hi-Fi and Ultra</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="muted">Per 1,000 is the plan price divided by its included screenshots. Some services charge extra credits for proxies, GPU rendering or long renders, as their pages explain. At higher volume Calotype is not the cheapest. Its largest plan is Pro: $49 for 25,000, $1.96 per 1,000. ScreenshotAPI.net's Growth plan is $69 for 40,000, $1.73 per 1,000. Above 25,000 a month, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
+
+  <h2 id="params">Parameter names</h2>
+  <p>Calotype's names on the left, then the closest name in each other API, read from each API's documentation on 19 November 2026. Calotype refuses a parameter it does not know with <code>invalid_parameters</code>, so a name carried over by mistake fails loudly instead of being ignored. The full list is in the <a href="/docs#parameters">docs</a>.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Calotype</th><th>ScreenshotOne</th><th>Urlbox</th><th>ApiFlash</th><th>ScreenshotAPI.net</th><th>Allscreenshots</th></tr></thead>
+    <tbody>
+      <tr><td><code>url</code></td><td><code>url</code></td><td><code>url</code></td><td><code>url</code></td><td><code>url</code></td><td><code>url</code></td></tr>
+      <tr><td><code>width</code></td><td><code>viewport_width</code></td><td><code>width</code></td><td><code>width</code></td><td><code>width</code></td><td><code>viewport.width</code></td></tr>
+      <tr><td><code>height</code></td><td><code>viewport_height</code></td><td><code>height</code></td><td><code>height</code></td><td><code>height</code></td><td><code>viewport.height</code></td></tr>
+      <tr><td><code>full_page</code></td><td><code>full_page</code></td><td><code>full_page</code></td><td><code>full_page</code></td><td><code>full_page</code></td><td><code>fullPage</code></td></tr>
+      <tr><td><code>format</code></td><td><code>format</code></td><td><code>format</code></td><td><code>format</code></td><td><code>file_type</code></td><td><code>format</code></td></tr>
+      <tr><td><code>quality</code></td><td><code>image_quality</code></td><td><code>quality</code></td><td><code>quality</code></td><td><code>image_quality</code></td><td><code>quality</code></td></tr>
+      <tr><td><code>device_scale_factor</code></td><td><code>device_scale_factor</code></td><td><code>retina</code></td><td><code>scale_factor</code></td><td><code>retina</code></td><td><code>viewport.deviceScaleFactor</code></td></tr>
+      <tr><td><code>delay_ms</code></td><td><code>delay</code> (seconds)</td><td><code>delay</code></td><td><code>delay</code> (seconds)</td><td><code>delay</code></td><td><code>delay</code></td></tr>
+      <tr><td><code>wait_until</code></td><td><code>wait_until</code></td><td><code>wait_until</code></td><td><code>wait_until</code></td><td><code>wait_for_event</code></td><td><code>waitUntil</code></td></tr>
+      <tr><td><code>block_ads</code></td><td><code>block_ads</code></td><td><code>block_ads</code></td><td><code>no_ads</code></td><td><code>block_ads</code></td><td><code>blockAds</code></td></tr>
+      <tr><td><code>dark_mode</code></td><td><code>dark_mode</code></td><td><code>dark_mode</code></td><td>none found</td><td><code>dark_mode</code></td><td><code>darkMode</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The key goes in an <code>Authorization: Bearer cal_...</code> header, or in <code>?access_key=</code>, the same name ScreenshotOne and ApiFlash use. Sources: <a href="https://screenshotone.com/docs/options/">ScreenshotOne</a>, <a href="https://urlbox.com/docs/options">Urlbox</a>, <a href="https://apiflash.com/documentation">ApiFlash</a>, <a href="https://screenshotapi.net/docs/getStarted">ScreenshotAPI.net</a>, <a href="https://docs.allscreenshots.com/api-reference/screenshots">Allscreenshots</a>.</p>
+
+  <h2 id="example">One request, converted</h2>
+  <p>A ScreenshotOne request:</p>
+<pre><code>https://api.screenshotone.com/take?access_key=$KEY&amp;url=https://example.com
+  &amp;viewport_width=1280&amp;viewport_height=800&amp;format=webp&amp;delay=2&amp;block_ads=true</code></pre>
+  <p>The same request to Calotype:</p>
+<pre><code>curl -H "Authorization: Bearer $CALOTYPE_KEY" \
+  "<span class="origin">https://calotype.dev</span>/v1/screenshot?url=https://example.com&amp;width=1280&amp;height=800&amp;format=webp&amp;delay_ms=2000&amp;block_ads=true" \
+  -o example.webp</code></pre>
+  <p>The answer is the image itself, with its type in <code>Content-Type</code>. Errors come back as JSON with a code, listed in the <a href="/docs#errors">docs</a>.</p>
+
+  <h2 id="differences">Differences that bite</h2>
+  <ul>
+    <li><strong>Delay units.</strong> ScreenshotOne and ApiFlash take <code>delay</code> in seconds. Calotype's <code>delay_ms</code> is in milliseconds, at most 10,000.</li>
+    <li><strong>Waiting for the network.</strong> Calotype's <code>wait_until</code> takes <code>load</code> (the default), <code>domcontentloaded</code>, <code>networkidle</code> or <code>commit</code>. ScreenshotOne's <code>networkidle0</code> and <code>networkidle2</code>, and ApiFlash's <code>network_idle</code>, become <code>networkidle</code>. ApiFlash waits for the network by default and Calotype does not, so a page that loads data late may need <code>wait_until=networkidle</code>.</li>
+    <li><strong>Sizes.</strong> Calotype's viewport defaults to 1280 by 800. It allows widths up to 3,840 and a scale factor up to 3. ApiFlash defaults to 1920 by 1080, and ScreenshotOne allows a scale factor up to 5.</li>
+    <li><strong>Defaults.</strong> Calotype's API returns PNG and does not block ads unless asked. Its MCP tool returns JPEG with ads blocked. Allscreenshots defaults to WebP with ads blocked, and ApiFlash to JPEG.</li>
+    <li><strong>The quota is a hard stop.</strong> At its limit, a key gets <code>429 quota_exceeded</code> until the monthly reset, and nothing more is charged. Some services sell extra screenshots above the plan instead.</li>
+    <li><strong>Only successful captures count.</strong> A failed capture or a refused request is not counted. See <a href="/pricing#counting">what counts</a>.</li>
+  </ul>
+
+  <h2 id="more">Where others do more</h2>
+  <p>These are things other services offer and Calotype does not, as their own pages showed on 19 November 2026:</p>
+  <ul>
+    <li><strong>Other outputs:</strong> PDF (ScreenshotOne, Urlbox, ScreenshotAPI.net, Allscreenshots), HTML to image (ScreenshotOne, ScreenshotAPI.net), Markdown (ScreenshotOne, Urlbox) and video (ScreenshotOne, Urlbox, ScreenshotAPI.net).</li>
+    <li><strong>Pages behind a login:</strong> sending cookies or headers with the request (ScreenshotAPI.net, Allscreenshots).</li>
+    <li><strong>Cleaner shots:</strong> hiding cookie banners (ScreenshotOne, Urlbox, ApiFlash, ScreenshotAPI.net), CSS and JavaScript injection, and element capture.</li>
+    <li><strong>Network options:</strong> proxies and a choice of IP location.</li>
+    <li><strong>Delivery:</strong> upload to S3, caching, webhooks, and no-code integrations such as Zapier and Make.</li>
+    <li><strong>MCP sign-in by OAuth:</strong> ScreenshotOne, Urlbox and Allscreenshots run remote MCP servers that sign in with OAuth. Calotype takes a key in a header only.</li>
+    <li><strong>Track record:</strong> Urlbox says it has operated for over a decade. Calotype started in November 2026.</li>
+  </ul>
+
+  <h2 id="playwright">Calotype or Playwright?</h2>
+  <p>Many agents get a browser through <a href="https://github.com/microsoft/playwright-mcp">Playwright MCP</a>. Its README, read on 19 November 2026, asks for Node.js 20 or newer. The server is started with <code>npx @playwright/mcp@latest</code>, and its browser runs on the same machine, or in the project's Docker image.</p>
+  <ul>
+    <li><strong>Use Playwright</strong> when the agent runs on a machine that can run a browser, when it needs to click, type or log in, or when the page is private: <code>localhost</code>, a staging site, anything behind a login. Calotype cannot reach those.</li>
+    <li><strong>Use Calotype</strong> when there is no browser to install: hosted agents, cloud sandboxes, n8n, serverless functions. Also use it when a browser is too heavy for the container, or when one look at a public page is all the agent needs.</li>
+  </ul>
+  <p>The two work side by side: Playwright for your own app, Calotype for public pages. Setup for each client is on <a href="/agents">For agents</a>.</p>
+
+  <h2 id="feedback">Tell us what is missing</h2>
+  <p>If you tried Calotype and something stopped you from switching, write it down: what you needed, what you used instead, and what would have made Calotype work for you. Send it to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>. A written review earns your key one month on Starter's quota (5,000 screenshots), free. Name the key by the <code>key_ref</code> that <a href="/docs#usage">GET /v1/usage</a> returns. Never send your key.</p>
+  <p>Skewbald, the AI agent that runs Calotype, reads every message. Reviews that say what is wrong are the useful ones.</p>

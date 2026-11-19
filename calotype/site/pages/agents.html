@@ -1,0 +1,107 @@
+  <h1>Calotype for AI agents</h1>
+  <p class="lede">Give your agent one tool, <code>screenshot</code>, that looks at any public web page from Calotype's browser. It is a remote MCP server: nothing to install, and nothing running inside your network.</p>
+
+  <ul class="toc">
+    <li><a href="#key">1. Get a key</a></li>
+    <li><a href="#claude-code">2. Claude Code</a></li>
+    <li><a href="#cursor">Cursor</a></li>
+    <li><a href="#vscode">VS Code</a></li>
+    <li><a href="#codex">Codex</a></li>
+    <li><a href="#n8n">n8n</a></li>
+    <li><a href="#other">Other clients</a></li>
+    <li><a href="#check">3. Check it works</a></li>
+    <li><a href="#tool">What the tool does</a></li>
+    <li><a href="#playwright">Calotype or Playwright?</a></li>
+  </ul>
+
+  <h2 id="key">1. Get a free key</h2>
+  <p>100 screenshots a month, with no email, no name and no account. Use the button, or let your agent make its own:</p>
+<pre><code>curl -s -X POST <span class="origin">https://calotype.dev</span>/v1/keys</code></pre>
+  <p>The answer's <code>key</code> field starts with <code>cal_</code>. It is shown once and cannot be shown again. Each address can make a few keys an hour.</p>
+  <button id="create-key" type="button">Create a free API key</button>
+  <div id="keybox" class="keybox" aria-live="polite">
+    <p><strong>Your key.</strong> This is the only time it is shown. Calotype keeps only a hash of it, so copy it now.</p>
+    <div class="keyrow"><code id="key-value"></code><button id="copy-key" class="secondary" type="button">Copy</button></div>
+  </div>
+  <p id="key-error" class="error" role="alert"></p>
+  <p class="muted">Keep the key out of shared files and chats. The examples below read it from an environment variable or a prompt where the client allows that.</p>
+
+  <h2 id="claude-code">2. Add the server: Claude Code</h2>
+<pre><code>claude mcp add --transport http calotype <span class="origin">https://calotype.dev</span>/mcp \
+  --header "Authorization: Bearer $CALOTYPE_KEY"</code></pre>
+  <p>Add <code>--scope user</code> to use it in every project.</p>
+
+  <h3 id="cursor">Cursor</h3>
+  <p>In <code>~/.cursor/mcp.json</code>, or <code>.cursor/mcp.json</code> in a project. Cursor fills <code>${env:CALOTYPE_KEY}</code> from your environment:</p>
+<pre><code>{
+  "mcpServers": {
+    "calotype": {
+      "url": "<span class="origin">https://calotype.dev</span>/mcp",
+      "headers": {"Authorization": "Bearer ${env:CALOTYPE_KEY}"}
+    }
+  }
+}</code></pre>
+
+  <h3 id="vscode">VS Code</h3>
+  <p>In <code>.vscode/mcp.json</code>. VS Code asks for the key once and stores it for you:</p>
+<pre><code>{
+  "inputs": [
+    {"type": "promptString", "id": "calotype-key", "description": "Calotype API key", "password": true}
+  ],
+  "servers": {
+    "calotype": {
+      "type": "http",
+      "url": "<span class="origin">https://calotype.dev</span>/mcp",
+      "headers": {"Authorization": "Bearer ${input:calotype-key}"}
+    }
+  }
+}</code></pre>
+
+  <h3 id="codex">Codex</h3>
+  <p>In <code>~/.codex/config.toml</code>. Codex sends the variable's value as the bearer token:</p>
+<pre><code>[mcp_servers.calotype]
+url = "<span class="origin">https://calotype.dev</span>/mcp"
+bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
+
+  <h3 id="n8n">n8n</h3>
+  <p>In an AI Agent workflow, add the <strong>MCP Client Tool</strong> to the agent's tools. It needs n8n 1.104.0 or later, which added the streamable HTTP transport. Set:</p>
+  <ul>
+    <li>Endpoint: <code><span class="origin">https://calotype.dev</span>/mcp</code></li>
+    <li>Server Transport: <strong>HTTP Streamable</strong>, not Server Sent Events</li>
+    <li>Authentication: <strong>Bearer Auth</strong>, with a new credential that holds your key</li>
+  </ul>
+  <p>n8n keeps the key in its encrypted credential store, not in the workflow.</p>
+
+  <h3 id="other">Other clients</h3>
+  <p>Any client that takes a server address and a custom header works. It needs three things:</p>
+  <ul>
+    <li>Address: <code><span class="origin">https://calotype.dev</span>/mcp</code></li>
+    <li>Transport: streamable HTTP (not the older SSE transport)</li>
+    <li>Header: <code>Authorization: Bearer cal_...</code></li>
+  </ul>
+  <p>Sign-in by OAuth is not offered yet, so clients that only support OAuth cannot connect.</p>
+
+  <h2 id="check">3. Check it works</h2>
+  <p>Ask your agent:</p>
+<pre><code>Take a dark-mode screenshot of https://calotype.dev/pricing and tell me the Starter price.</code></pre>
+  <p>The price is on the rendered page, so a right answer means the agent saw it. That first screenshot counts as one of your 100.</p>
+
+  <h2 id="tool">What the tool does</h2>
+  <ul>
+    <li><strong>Inputs.</strong> <code>url</code>, plus optional <code>full_page</code>, <code>width</code>, <code>height</code>, <code>format</code>, <code>dark_mode</code> and <code>block_ads</code>. The tool returns JPEG with ads blocked unless asked otherwise, which keeps images small for a model.</li>
+    <li><strong>Output.</strong> The image, and one line of text: the final address after redirects, the image size, and this month's count for the key.</li>
+    <li><strong>Read-only.</strong> One look at one page: no clicking, typing or scrolling, and nothing is changed anywhere.</li>
+    <li><strong>Public pages only.</strong> Private, loopback and cloud-metadata addresses are refused on every request, redirect and sub-request, so the tool cannot be turned on your own network. It cannot see <code>localhost</code>; for a local dev server, use a browser on your machine, such as Playwright MCP.</li>
+    <li><strong>Errors the agent can read.</strong> A refused address, a page that fails to load or a used-up quota comes back as a tool error starting with its code, such as <code>quota_exceeded</code>. Only captures that return an image count.</li>
+    <li><strong>Pages can still talk to the model.</strong> Calotype protects your network, not your model: a page's text reaches the model inside the image. Treat it as data, not instructions.</li>
+    <li><strong>Sandboxes.</strong> If your agent's sandbox limits outbound traffic, allow <code>calotype.dev</code>.</li>
+  </ul>
+  <h2 id="playwright">Calotype or Playwright?</h2>
+  <p>Playwright MCP runs a real browser next to your agent. Its README, read on 19 November 2026, asks for Node.js 20 or newer and starts the server with <code>npx @playwright/mcp@latest</code>. The browser runs on that machine, or in the project's Docker image.</p>
+  <ul>
+    <li><strong>Use Playwright</strong> when the agent runs where a browser can run, when it needs to click, type or log in, or when the page is private, such as <code>localhost</code> or a staging site.</li>
+    <li><strong>Use Calotype</strong> when there is no browser to install: hosted agents, cloud sandboxes, n8n, serverless functions. Also use it when a browser is too heavy for the container, or when one look at a public page is enough.</li>
+  </ul>
+  <p>Many setups use both. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
+
+  <p>The full reference, including the HTTP API, is in the <a href="/docs#mcp">docs</a>. Plans and prices are on <a href="/pricing">Pricing</a>. Questions go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>, which Skewbald, the AI agent that runs Calotype, reads and answers.</p>

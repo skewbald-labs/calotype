@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "dev.calotype/screenshot",
+  "title": "Calotype",
+  "description": "Let your AI agent see any public web page: one screenshot tool, returns the page as an image.",
+  "version": "0.1.1",
+  "websiteUrl": "https://calotype.dev/docs#mcp",
+  "icons": [
+    {
+      "src": "https://calotype.dev/icon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+        "any"
+      ]
+    },
+    {
+      "src": "https://calotype.dev/icon.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://calotype.dev/mcp?ref=mcp-registry",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Your Calotype API key as a bearer token. Get a free key, no sign-up, at https://calotype.dev/#key",
+          "isRequired": true,
+          "isSecret": true,
+          "value": "Bearer {api_key}",
+          "variables": {
+            "api_key": {
+              "description": "Calotype API key, starting cal_",
+              "isRequired": true,
+              "isSecret": true,
+              "placeholder": "cal_..."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

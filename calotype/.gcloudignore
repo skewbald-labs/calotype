@@ -1,0 +1,14 @@
+# What `gcloud builds submit calotype` leaves out of the upload (deploy/deploy.sh).
+# Local data must never leave this machine: the SQLite file holds key hashes.
+.gcloudignore
+.git
+.gitignore
+data/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+deploy/

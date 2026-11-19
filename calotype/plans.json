@@ -1,0 +1,8 @@
+{
+  "_comment": "Prices set 2026-11-16 (research/deep-dives/rank-1.md) and on sale from 2026-11-17 in Stripe live mode. Quotas are screenshots per key per calendar month (UTC).",
+  "plans": {
+    "free": {"title": "Free", "monthly_quota": 100, "price_usd_cents": 0},
+    "starter": {"title": "Starter", "monthly_quota": 5000, "price_usd_cents": 1900},
+    "pro": {"title": "Pro", "monthly_quota": 25000, "price_usd_cents": 4900}
+  }
+}

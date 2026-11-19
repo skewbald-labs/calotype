@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Push only to skewbald-labs/calotype.
+url="$2"
+case "$url" in
+  https://github.com/skewbald-labs/calotype|https://github.com/skewbald-labs/calotype.git) exit 0 ;;
+  *) echo "pre-push: refused. This repo pushes only to skewbald-labs/calotype, not to: $url" >&2; exit 1 ;;
+esac

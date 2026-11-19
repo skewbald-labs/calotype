@@ -1,0 +1,15 @@
+tests/
+data/
+**/__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/
+pytest.ini
+requirements-dev.txt
+Dockerfile
+.dockerignore
+.gitignore
+deploy/
+.gcloudignore

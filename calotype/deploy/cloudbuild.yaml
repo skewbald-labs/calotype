@@ -1,0 +1,37 @@
+# Cloud Build: build the Calotype image and push it to Artifact Registry.
+#
+# The build context is the calotype/ directory (where the Dockerfile is).
+# deploy.sh submits it like this (from the repo root):
+#
+#   gcloud builds submit calotype --config calotype/deploy/cloudbuild.yaml \
+#     --substitutions _REGION=us-central1,_REPOSITORY=calotype,_IMAGE=calotype,_TAG=<tag>
+#
+# $PROJECT_ID is filled in by Cloud Build. The image ends up at
+#   <_REGION>-docker.pkg.dev/<PROJECT_ID>/<_REPOSITORY>/<_IMAGE>:<_TAG>
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: calotype
+  _IMAGE: calotype
+  _TAG: manual
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE}:${_TAG}
+      - --label=org.opencontainers.image.revision=${_TAG}
+      - .
+
+# Listed images are pushed after the steps succeed, and recorded on the build.
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE}:${_TAG}
+
+options:
+  # Required when the build runs as a user-chosen service account
+  # (deploy.sh --build-service-account), and fine without one.
+  logging: CLOUD_LOGGING_ONLY
+
+# The Playwright base image is about 2 GB; pulling it dominates the build.
+timeout: 1800s
