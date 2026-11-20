@@ -107,7 +107,7 @@ def test_docs_is_the_site_page_not_swagger(site):
     assert site.get("/openapi.json").status_code == 200
     # Site routes stay out of the API schema.
     assert set(site.get("/openapi.json").json()["paths"]) == {
-        "/health", "/healthz", "/v1/screenshot", "/v1/keys", "/v1/usage", "/v1/plans",
+        "/health", "/healthz", "/v1/screenshot", "/v1/keys", "/v1/keys/email", "/v1/usage", "/v1/plans",
         "/v1/billing/checkout", "/v1/billing/portal", "/v1/billing/webhook",
     }
 
@@ -178,8 +178,9 @@ def test_light_and_dark_and_phone_width(site, page):
 @pytest.mark.parametrize("page", PAGES, ids=PAGE_IDS)
 def test_no_personal_data_and_no_human_team(site, page):
     doc = site.get(page.path).text
-    # The only email address on the site is the support inbox.
-    assert set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", doc)) <= {"skewbald@agentmail.to"}
+    # The only email address on the site is the support inbox; examples use the reserved example.com.
+    found = set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", doc))
+    assert {a for a in found if not a.endswith("@example.com")} <= {"skewbald@agentmail.to"}
     assert "our team" not in doc.lower() and "our staff" not in doc.lower()
     assert "reviewed by a lawyer" not in doc.lower()
 

@@ -1,13 +1,13 @@
   <h1>Privacy notice</h1>
   <p class="lede">Calotype is built to know as little about you as it can. This page says exactly what it keeps, what it logs, and what it never stores.</p>
-  <p class="muted">Last changed 17 November 2026.</p>
+  <p class="muted">Last changed 20 November 2026.</p>
 
   <h2 id="who">Who is responsible</h2>
   <p>Calotype is sold by Dostal Technology, a Texas company, and built and run by Skewbald, an AI agent. Questions about this notice, and requests about your data, go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
 
   <h2 id="short">In short</h2>
   <ul>
-    <li>No account, no name, no email address is needed for a free key.</li>
+    <li>No account, no name, no email address is needed for a free key. You may add an email address to a key, only to be told when it nears its monthly quota.</li>
     <li>Calotype stores a hash of your key and counts of what it has done, not the key, not the pages you capture, and not the images.</li>
     <li>Your IP address is held in memory for at most an hour, only to limit key creation, and never written down by Calotype.</li>
     <li>No cookies, no analytics, no trackers, nothing loaded from other sites.</li>
@@ -23,17 +23,26 @@
     <li>whether and when the key was revoked;</li>
     <li>for Calotype's own keys, a flag saying so: keys made by its operator rather than through the website, which may also carry a short label, and test keys its operator made through the website;</li>
     <li>if you reached the site through a link tagged like <code>?ref=dt-linkedin</code>, that tag. Calotype chooses these tags for its own posts, so they show which post brought a key. They say nothing about you;</li>
-    <li>for paid keys only, the Stripe customer id and subscription id, which link the key to its subscription.</li>
+    <li>for paid keys only, the Stripe customer id and subscription id, which link the key to its subscription;</li>
+    <li>only if you gave one, an email address for <a href="#quota-emails">quota emails</a>, and a record of each quota email queued for the key.</li>
   </ul>
   <p>It also keeps the ids of the Stripe webhook events it has handled, so that a repeated event is not applied twice. Those ids say nothing about you.</p>
-  <p>That is all. There is no email address, name, IP address, address of a captured page or image in the database.</p>
+  <p>That is all. There is no name, IP address, address of a captured page or image in the database, and no email address unless you added one.</p>
+
+  <h2 id="quota-emails">Quota emails (optional)</h2>
+  <p><strong>What.</strong> If you give an email address, when you make a key or later with <code>POST /v1/keys/email</code>, Calotype stores it on that key's record.</p>
+  <p><strong>Why.</strong> Only to tell you when the key reaches 80% and 100% of its monthly quota: at most two emails per key per calendar month, and at most four per address per month across all keys. Nothing else is ever sent to it. It is not used for marketing, not shared and not sold.</p>
+  <p><strong>What else is kept.</strong> For each quota email, a record with the key's internal number and reference, the month, the threshold and the counts, kept with the key's record. Once the email is sent, the record also holds a keyed hash of the address, used only to keep to the four-a-month limit. The record never holds the address itself.</p>
+  <p><strong>Who processes it.</strong> The address is stored in Google Cloud Firestore with the rest of the key's record. The emails are sent by AgentMail from <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>, so AgentMail handles the address and the text of each email it sends, and a copy of each sent email stays in that inbox, as sent mail does. The program that sends them runs in Calotype's Google Cloud project; the public service never holds the key to the mail account.</p>
+  <p><strong>How long.</strong> On the key's record, until you remove it, or the key is revoked or deleted. Copies of emails already sent stay in the inbox's sent mail.</p>
+  <p><strong>How to remove it.</strong> Open the link at the end of any quota email; it removes the address at once. Or reply "stop" to the email, or call <code>DELETE /v1/keys/email</code> with the key, or write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
 
   <h2 id="ip">IP addresses</h2>
   <p>To stop one person from making keys by the hundred, the server counts recent key requests per IP address. That count lives in the server's memory only. An address is forgotten at most an hour after its last key request, and all of them are gone when the server restarts. Calotype never writes an IP address to its database, its logs or a file. Screenshot calls do not look at your IP address at all.</p>
 
   <h2 id="logs">What Calotype logs</h2>
   <p>Calotype writes one log line per request, to Google Cloud Logging, with: a random request id, the method and path (without the query string), the status, how long it took, the key's internal number, and for screenshots the scheme and host of the page, such as <code>https://example.com</code>. A screenshot line adds the image format, whether it was full-page, the image's size in bytes, the time taken, the page's HTTP status, how many of the page's requests were blocked, and whether the page hit the download limit. Billing events log the key's number, the plan and Stripe's ids.</p>
-  <p>Calotype's logs never contain your key, the full address you captured, its path or query, your IP address or your request headers. Error messages are scrubbed of keys and full addresses before they are written.</p>
+  <p>Calotype's logs never contain your key, the full address you captured, its path or query, your IP address, your email address or your request headers. Error messages are scrubbed of keys and full addresses before they are written.</p>
 
   <h2 id="platform">What the hosting platform logs</h2>
   <p>Calotype runs on Google Cloud Run. Google's platform makes its own record of each request it passes to Calotype, including the full request address with its query string, the caller's IP address and user agent. Calotype's Google Cloud project is set to drop those records before they are stored (a Cloud Logging exclusion, in place since 17 November 2026), so they are not kept. Google's front end still handles the request itself in order to deliver it.</p>
@@ -53,11 +62,11 @@
   <p>This site and the API set no cookies, and load no analytics, trackers, fonts or scripts from other sites. Stripe's checkout and billing pages are Stripe's own site and follow Stripe's policies.</p>
 
   <h2 id="sharing">Who else sees data</h2>
-  <p>Calotype does not sell or share data for advertising. The only other parties are the services it runs on: Google Cloud (hosting, database and logs), Stripe (payments) and AgentMail (the support inbox). Data is disclosed beyond them only where the law requires it.</p>
+  <p>Calotype does not sell or share data for advertising. The only other parties are the services it runs on: Google Cloud (hosting, database and logs), Stripe (payments) and AgentMail (the support inbox, and quota emails if you asked for them). Data is disclosed beyond them only where the law requires it.</p>
 
   <h2 id="keeping">How long it is kept, and your choices</h2>
-  <p>A key's record is kept for as long as the key exists. There is no automatic deletion yet.</p>
-  <p>To have a key's record deleted, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a> and include the key, which is how Calotype finds its record; the key stops working once the record is gone. For a paid key you can instead write from the email address on your Stripe receipt. Within 7 days of your request, the key's record and all its monthly usage counts are deleted from Calotype's database for good. A paid key's subscription is cancelled first, so the plan ends and you are not charged again.</p>
+  <p>A key's record is kept for as long as the key exists. There is no automatic deletion yet. A quota-email address is kept only until you remove it, or the key is revoked or deleted.</p>
+  <p>To have a key's record deleted, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a> and include the key, which is how Calotype finds its record; the key stops working once the record is gone. For a paid key you can instead write from the email address on your Stripe receipt. Within 7 days of your request, the key's record (with its email address, if it had one), all its monthly usage counts and its quota-email records are deleted from Calotype's database for good. A paid key's subscription is cancelled first, so the plan ends and you are not charged again.</p>
   <p>Two things are not deleted this way. Stripe keeps its own records of the payments you made, as the law requires of payment records; Calotype no longer holds the ids that link them to the key. And log lines already written, which carry the key's internal number but not the key or anything else about you, are not rewritten; they are removed when the logs' retention period ends.</p>
   <p>You can also simply stop using a free key; nothing else about you is held.</p>
 

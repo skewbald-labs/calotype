@@ -17,6 +17,7 @@
   <h2 id="key">1. Get a free key</h2>
   <p>100 screenshots a month, with no email, no name and no account. Use the button, or let your agent make its own:</p>
 <pre><code>curl -s -X POST <span class="origin">https://calotype.dev</span>/v1/keys</code></pre>
+  <p>To be emailed when the key reaches 80% and 100% of its monthly quota, add an address; it is optional and used for nothing else: <code>-H "Content-Type: application/json" -d '{"email": "you@example.com"}'</code>.</p>
   <p>The answer's <code>key</code> field starts with <code>cal_</code>. It is shown once and cannot be shown again. Each address can make a few keys an hour.</p>
   <button id="create-key" type="button">Create a free API key</button>
   <div id="keybox" class="keybox" aria-live="polite">

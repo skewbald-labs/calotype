@@ -5,6 +5,7 @@
     <li><a href="#basics">Basics</a></li>
     <li><a href="#auth">Authentication</a></li>
     <li><a href="#keys">Create a key</a></li>
+    <li><a href="#quota-emails">Quota emails (optional)</a></li>
     <li><a href="#screenshot">Take a screenshot</a></li>
     <li><a href="#parameters">Parameters</a></li>
     <li><a href="#response">The response</a></li>
@@ -31,7 +32,7 @@
   <p>The key is the account. Calotype stores only its SHA-256 hash, so a lost key cannot be shown again.</p>
 
   <h2 id="keys">Create a key</h2>
-  <p><code>POST /v1/keys</code> makes a free-plan key. It takes no body and no authentication, and asks for nothing about you. The <a href="/#key">button on the home page</a> calls it.</p>
+  <p><code>POST /v1/keys</code> makes a free-plan key. It needs no body and no authentication, and asks for nothing about you. The <a href="/#key">button on the home page</a> calls it.</p>
 <pre><code>curl -X POST <span class="origin">https://calotype.dev</span>/v1/keys</code></pre>
   <p>It answers <code>201</code>:</p>
 <pre><code>{
@@ -41,6 +42,20 @@
   "message": "This is the only time the key is shown. Calotype stores only its hash and cannot recover it."
 }</code></pre>
   <p>Key creation is rate limited; see <a href="#limits">Quotas and rate limits</a>.</p>
+
+  <h2 id="quota-emails">Quota emails (optional)</h2>
+  <p>A key can hold one email address. Calotype then emails it when the key reaches 80% of its monthly quota and again at 100%: at most two emails per key per calendar month, and at most four per address per month across all keys. Nothing else is sent to it. The address is never shown back in full; <code>/v1/usage</code> shows a masked form. See <a href="/privacy#quota-emails">Privacy</a>.</p>
+  <p>Give it when you make the key, as a JSON body:</p>
+<pre><code>curl -X POST <span class="origin">https://calotype.dev</span>/v1/keys \
+  -H "Content-Type: application/json" -d '{"email": "you@example.com"}'</code></pre>
+  <p>The answer adds <code>"email": "y***@example.com"</code> and <code>"notices": true</code>. A malformed address answers <code>400 invalid_email</code> and makes no key. The check is light: one <code>@</code>, a dot in the domain, at most 254 characters. The domain is stored in lower case.</p>
+  <h3><code>POST /v1/keys/email</code></h3>
+  <p>Sets or replaces the address of the key that calls it. Body <code>{"email": "you@example.com"}</code>. Answers <code>{"email": "y***@example.com", "notices": true}</code>.</p>
+  <h3><code>DELETE /v1/keys/email</code></h3>
+  <p>Removes the address. Answers <code>{"email": null, "notices": false}</code>, also when there was none.</p>
+  <h3>The link in each email</h3>
+  <p>Every quota email ends with a link to <code>/v1/keys/email/remove?token=...</code>. Opening it removes the address at once; no key is needed. The link works only while the key holds the address it was sent to. Replying "stop" to the email works too. Revoking or deleting a key removes its address.</p>
+  <p>A server without quota emails set up does not store an address: <code>POST /v1/keys</code> still makes the key and answers <code>"notices": false</code>, and <code>POST /v1/keys/email</code> answers <code>503 notices_unavailable</code>.</p>
 
   <h2 id="screenshot">Take a screenshot</h2>
   <p><code>GET /v1/screenshot</code> with the parameters in the query string:</p>
@@ -110,6 +125,7 @@
     <tbody>
       <tr><td>400</td><td><code>invalid_parameters</code></td><td>A parameter is missing, unknown, out of range, or in a combination that is not allowed. <code>details</code> lists each problem field when there is one.</td></tr>
       <tr><td>400</td><td><code>invalid_json</code></td><td>The POST body is not a JSON object.</td></tr>
+      <tr><td>400</td><td><code>invalid_email</code></td><td>The <a href="#quota-emails">email address</a> sent to <code>POST /v1/keys</code> or <code>POST /v1/keys/email</code> is not valid.</td></tr>
       <tr><td>400</td><td><code>invalid_url</code></td><td>The address cannot be parsed, is too long, has no host, has credentials in it, contains spaces, control characters or backslashes, or has a port outside 1 to 65535.</td></tr>
       <tr><td>400</td><td><code>invalid_scheme</code></td><td>The address is not <code>http</code> or <code>https</code>.</td></tr>
       <tr><td>400</td><td><code>blocked_target</code></td><td>The host is private, local or reserved, or the port is not allowed.</td></tr>
@@ -124,6 +140,7 @@
       <tr><td>429</td><td><code>quota_exceeded</code></td><td>The key has used its screenshots for the month. Adds <code>plan</code>, <code>limit</code>, <code>used</code> and <code>resets_at</code>.</td></tr>
       <tr><td>429</td><td><code>rate_limited</code></td><td>Too many keys were created recently. Adds <code>retry_after_s</code>, and the <code>Retry-After</code> header.</td></tr>
       <tr><td>500</td><td><code>internal_error</code></td><td>Something failed on Calotype's side.</td></tr>
+      <tr><td>503</td><td><code>notices_unavailable</code></td><td>Quota emails are not set up on this server, so <code>POST /v1/keys/email</code> cannot store an address.</td></tr>
       <tr><td>503</td><td><code>busy</code></td><td>Every renderer stayed busy for 10 seconds. Retry after the <code>Retry-After</code> header (5 seconds).</td></tr>
       <tr><td>504</td><td><code>timeout</code></td><td>The page did not load, or the capture did not finish, within 30 seconds.</td></tr>
     </tbody>
@@ -144,8 +161,8 @@
   <h2 id="usage">Usage, plans and health</h2>
   <h3><code>GET /v1/usage</code></h3>
   <p>Your key's plan and this month's count. It needs the key and does not count as a screenshot.</p>
-<pre><code>{"plan": "free", "month": "2026-11", "used": 12, "limit": 100, "resets_at": "2026-12-01T00:00:00Z", "key_ref": "3f9a0c71b2de"}</code></pre>
-  <p><code>key_ref</code> names your key without giving it away: quote it when you write to support, and never send the key itself.</p>
+<pre><code>{"plan": "free", "month": "2026-11", "used": 12, "limit": 100, "resets_at": "2026-12-01T00:00:00Z", "key_ref": "3f9a0c71b2de", "email": "y***@example.com", "notices": true}</code></pre>
+  <p><code>key_ref</code> names your key without giving it away: quote it when you write to support, and never send the key itself. <code>email</code> is the key's <a href="#quota-emails">quota-email address</a>, masked, or <code>null</code>; <code>notices</code> says whether quota emails will be sent.</p>
   <h3><code>GET /v1/plans</code></h3>
   <p>The plans, their monthly quotas and prices in US dollars. No key needed. <code>provisional</code> is <code>true</code> only on a server where paid plans are not on sale.</p>
 <pre><code>{"provisional": false, "plans": [{"name": "free", "title": "Free", "monthly_quota": 100, "price_usd": 0.0}, ...]}</code></pre>

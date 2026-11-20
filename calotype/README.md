@@ -8,7 +8,7 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 
 | Path | What it is |
 |---|---|
-| `app.py` | FastAPI app: `/v1/screenshot` (GET and POST), `/v1/keys`, `/v1/usage`, `/v1/plans`, `/v1/billing/*`, `/health` (also `/healthz`; Cloud Run keeps `/healthz` for itself on run.app addresses), and the website (`pages.py`) |
+| `app.py` | FastAPI app: `/v1/screenshot` (GET and POST), `/v1/keys`, `/v1/keys/email`, `/v1/usage`, `/v1/plans`, `/v1/billing/*`, `/health` (also `/healthz`; Cloud Run keeps `/healthz` for itself on run.app addresses), and the website (`pages.py`) |
 | `capture.py` | One Chromium, a fresh context per capture, a semaphore for concurrency |
 | `egress.py` | The per-capture forward proxy that is Chromium's only route to the network |
 | `ssrf.py` | The address rule: what may be fetched |
@@ -16,6 +16,7 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 | `storage.py` | The `Storage` interface, and keys (hashed) and usage counts in SQLite |
 | `firestore_storage.py` | The same `Storage` in Google Cloud Firestore, for Cloud Run (`CALOTYPE_STORAGE=firestore`) |
 | `ratelimit.py` | In-memory limit on self-serve key creation |
+| `notices.py` | The optional email address on a key, and the 80% and 100% quota notices: validation, masking, the signed removal link |
 | `billing.py` | Stripe Checkout, customer portal and webhook handling (off unless the Stripe variables are set) |
 | `deploy/` | Cloud Build config, `deploy.sh` for Cloud Run, and the IAM roles and cost notes (`deploy/README.md`) |
 | `admin.py` | Key administration CLI |
@@ -147,15 +148,16 @@ The only way past the rule is `AddressPolicy.exceptions`, a set of exact `(ip, p
 ## Keys, privacy and the demand-test contacts
 
 - **Self-serve keys.** `POST /v1/keys`, or the button on the landing page, creates a free-plan key and returns it once. It asks for nothing: no email, no name, no account.
-- **What is stored.** In either backend (SQLite or Firestore), for each key: the SHA-256 hash (never the key), plan, creation time, an `internal` flag, an optional operator label (CLI keys only), a lifetime count of successful screenshots, per-month usage counts, a revocation time, and, once a key has paid, its Stripe customer id and subscription id. Also the ids of Stripe events already handled. No IP address, email or name is stored anywhere (Stripe holds the buyer's details), and logs carry no IPs.
+- **What is stored.** In either backend (SQLite or Firestore), for each key: the SHA-256 hash (never the key), plan, creation time, an `internal` flag, an optional operator label (CLI keys only), a lifetime count of successful screenshots, per-month usage counts, a revocation time, and, once a key has paid, its Stripe customer id and subscription id. Also the ids of Stripe events already handled. No IP address or name is stored anywhere (Stripe holds the buyer's details), no email address unless the holder adds one (below), and logs carry no IPs or addresses.
+- **Quota emails (optional).** `POST /v1/keys` takes `{"email": ...}`; `POST /v1/keys/email` sets or replaces it and `DELETE /v1/keys/email` removes it (both with the key). The address is used only to say when the key reaches 80% and 100% of its monthly quota. No endpoint returns it in full; `/v1/usage` shows `s***@example.com` and `notices`. When a capture's count reaches the 80% or the 100% mark, the service queues a notice (`notices` table or `{prefix}notices` collection: key id, month, threshold, counts, the upgrade line the MCP tool uses; never the address). It does not send mail. The `skewbald-checks` job in the free-reign repository (`ops/checks/main.py`) sends pending notices through AgentMail every 15 minutes, at most 4 per address per month across all keys, and marks each sent only after a 2xx. Each notice ends with `GET /v1/keys/email/remove?token=...` (also POST, for mail clients' one-click unsubscribe), whose token is an HMAC of the key id and the address under `CALOTYPE_EMAIL_TOKEN_SECRET`. Without that setting no address is stored and nothing is queued. Revoking or deleting a key removes its address; `python -m calotype.admin remove-email ADDRESS_OR_ID` handles a "stop" reply.
 - **Rate limit.** Key creation is limited to 3 per client IP per hour and 200 per hour overall. Both limits live only in process memory (`ratelimit.py`), are never persisted or logged, and reset when the process restarts. With several instances, each instance keeps its own count.
 - **Contact ordinal.** A "contact" is a non-internal key with at least one successful screenshot. Its ordinal is its creation order among those keys. Keys made with `python -m calotype.admin create-key` are `internal` and never count. A test key made through the public button (such as key 1 on the live service) is marked the same way with `python -m calotype.admin mark-internal ID`. The demand test counts the first 20. List them with `python -m calotype.admin contacts`. The API also logs `first successful screenshot` with the ordinal when a key becomes a contact. The ordinal is derived on read, so a key created earlier that takes its first screenshot later moves ahead of later-created keys.
 
-Other CLI commands: `list-keys`, `revoke-key ID`, `delete-key ID`, `key-id`, `mark-internal ID`, `set-plan ID PLAN`, `usage ID`.
+Other CLI commands: `list-keys`, `revoke-key ID`, `delete-key ID`, `key-id`, `mark-internal ID`, `set-plan ID PLAN`, `usage ID`, `remove-email ADDRESS_OR_ID`.
 
 `revoke-key` on a paid key cancels its Stripe subscription first: at once, with no prorated refund, or with `--at-period-end` at the end of the month already paid for. It needs `STRIPE_SECRET_KEY` in the environment and refuses without it, unless `--no-stripe` is given; then it revokes the key and warns that the subscription must be cancelled by hand. Running it again on a revoked key that still has a subscription retries the cancellation.
 
-`delete-key ID` handles a request to delete a key's record (the privacy notice promises it within 7 days). Without `--yes` it only prints what it would delete. With `--yes` it cancels a paid key's subscription exactly as `revoke-key` does (same `--at-period-end` and `--no-stripe` flags), then deletes the key's record and all its usage counts on either backend, and prints a note that Stripe keeps its own payment records. Ids are not reused. To find a key's id from the key someone sent, pipe the key into `python -m calotype.admin key-id` (it reads standard input, so the key stays out of the shell history).
+`delete-key ID` handles a request to delete a key's record (the privacy notice promises it within 7 days). Without `--yes` it only prints what it would delete. With `--yes` it cancels a paid key's subscription exactly as `revoke-key` does (same `--at-period-end` and `--no-stripe` flags), then deletes the key's record (with any email address), all its usage counts and its quota notices on either backend, and prints a note that Stripe keeps its own payment records. Ids are not reused. To find a key's id from the key someone sent, pipe the key into `python -m calotype.admin key-id` (it reads standard input, so the key stays out of the shell history).
 
 ## MCP server
 
@@ -200,6 +202,7 @@ It runs from a checkout of this repo (the working directory must contain `caloty
 | `STRIPE_SECRET_KEY` | | Stripe API secret key. Secret: Secret Manager on Cloud Run; a local secret store when run by hand |
 | `STRIPE_WEBHOOK_SECRET` | | the webhook endpoint's signing secret (`whsec_...`). Secret |
 | `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PRO` | | the monthly Price ids for each plan |
+| `CALOTYPE_EMAIL_TOKEN_SECRET` | | signs the removal links in quota emails. Secret, at least 32 characters; the sender job needs the same value. Unset: no address is stored and no notice is queued |
 | `CALOTYPE_API_KEY`, `CALOTYPE_API_URL` | | MCP server only |
 
 No secrets are needed to run the API. Billing needs all four `STRIPE_*` variables; with any missing it stays off and `/v1/billing/*` answers 503. Firestore uses the environment's default Google credentials (on Cloud Run, the service's service account); no key file is used, and none belongs in this repo. The landing-page prices are provisional (a comment in the HTML says so). `plans.json` is the source of truth for quotas.
@@ -234,7 +237,9 @@ calotype/deploy/deploy.sh --dry-run --project PROJECT_ID \
 ## Known gaps
 
 - Billing is tested against a mocked Stripe client. Live Stripe has run since 17 November 2026; a server without Stripe settings keeps billing off (503). `plans.json` prices must be kept equal to the Stripe Prices by hand.
-- The Stripe processed-event list grows without bound (one small row per event). Firestore TTL or a periodic delete can trim it later.
+- The Stripe processed-event list grows without bound (one small row per event). Firestore TTL or a periodic delete can trim it later. So do quota-notice records (at most two per key per month), until the key is deleted.
+- `admin remove-email ADDRESS` matches the address as stored: the domain in any case, the local part exactly.
+- A removal link is a GET that acts at once, as asked. A mail scanner that opens links could remove an address; the holder can add it again.
 - The Firestore backend is tested against the Firestore emulator only, not against a real Firestore database. Nothing moves data from SQLite to Firestore (there is no deployed data to move).
 - The image is built by Cloud Build (`deploy/cloudbuild.yaml`), not locally; the Playwright base image is about 2 GB.
 - No PDF output, no element selector, no custom headers or cookies, and no caching of repeat captures.
