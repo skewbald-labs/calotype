@@ -5,7 +5,7 @@ Each page's content is a fragment in ``site/pages/``, wrapped in the shared
 when the app is created, and served from memory.
 
 The site loads nothing from other hosts: no scripts, fonts, images,
-analytics or cookies. Every inline ``<script>`` and ``<style>`` is hashed into
+analytics or cookies. Images come from the site itself (``site/images/``) or ``data:`` URLs. Every inline ``<script>`` and ``<style>`` is hashed into
 the page's Content-Security-Policy, so a browser runs those and nothing else.
 """
 
@@ -141,7 +141,7 @@ def _csp(document: str) -> str:
     script_src = " ".join(hashes["script"]) or "'none'"
     style_src = " ".join(hashes["style"]) or "'none'"
     return (
-        f"default-src 'none'; script-src {script_src}; style-src {style_src}; img-src data:; "
+        f"default-src 'none'; script-src {script_src}; style-src {style_src}; img-src 'self' data:; "
         "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
     )
 
@@ -227,11 +227,12 @@ def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True) -> Non
         app.add_route(path, page_endpoint(path), include_in_schema=False)
     app.add_route("/robots.txt", text_endpoint(robots_txt(), "text/plain; charset=utf-8"), include_in_schema=False)
     app.add_route("/sitemap.xml", text_endpoint(sitemap_xml(), "application/xml"), include_in_schema=False)
-    for path, (data, media_type) in brand_files(site_dir).items():
+    for path, (data, media_type) in {**brand_files(site_dir), **image_files(site_dir)}.items():
         app.add_route(path, file_endpoint(data, media_type), include_in_schema=False)
 
 
 BRAND_TYPES = {".svg": "image/svg+xml", ".png": "image/png"}
+IMAGE_TYPES = {".webp": "image/webp", ".png": "image/png"}
 
 
 def brand_files(site_dir: Path) -> dict[str, tuple[bytes, str]]:
@@ -246,6 +247,21 @@ def brand_files(site_dir: Path) -> dict[str, tuple[bytes, str]]:
         f"/{f.name}": (f.read_bytes(), BRAND_TYPES[f.suffix])
         for f in sorted(brand_dir.iterdir())
         if f.suffix in BRAND_TYPES
+    }
+
+
+def image_files(site_dir: Path) -> dict[str, tuple[bytes, str]]:
+    """Images the pages and the README show, such as the demo screenshot, at ``/images/<name>``.
+
+    A file's name is its URL, so replace an image under a new name rather than editing it:
+    the README on GitHub links to these paths."""
+    images_dir = site_dir / "images"
+    if not images_dir.is_dir():
+        return {}
+    return {
+        f"/images/{f.name}": (f.read_bytes(), IMAGE_TYPES[f.suffix])
+        for f in sorted(images_dir.iterdir())
+        if f.suffix in IMAGE_TYPES
     }
 
 
