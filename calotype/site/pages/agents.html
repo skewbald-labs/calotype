@@ -1,11 +1,28 @@
   <h1>Calotype for AI agents</h1>
   <p class="lede">Give your agent one tool, <code>screenshot</code>, that looks at any public web page from Calotype's browser. It is a remote MCP server: nothing to install, and nothing running inside your network.</p>
 
+  <div class="install" id="install">
+    <a class="button" href="cursor://anysphere.cursor-deeplink/mcp/install?name=calotype&amp;config=eyJ1cmwiOiJodHRwczovL2NhbG90eXBlLmRldi9tY3A%2FcmVmPWJ0bi1jdXJzb3Itc2l0ZSIsImhlYWRlcnMiOnsiQXV0aG9yaXphdGlvbiI6IkJlYXJlciAke2VudjpDQUxPVFlQRV9LRVl9In19">Add to Cursor</a>
+    <a class="button" href="vscode:mcp/install?%7B%22name%22%3A%22calotype%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fcalotype.dev%2Fmcp%3Fref%3Dbtn-vscode-site%22%2C%22headers%22%3A%7B%22Authorization%22%3A%22Bearer%20%24%7Binput%3Acalotype-key%7D%22%7D%2C%22inputs%22%3A%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22calotype-key%22%2C%22description%22%3A%22Calotype%20API%20key%2C%20starts%20cal_%22%2C%22password%22%3Atrue%7D%5D%7D">Install in VS Code</a>
+  </div>
+  <p class="muted">Each button opens the app, which shows the server and asks before adding it. Neither carries a key. VS Code asks for yours and keeps it in its secret storage; Cursor reads it from the <code>CALOTYPE_KEY</code> environment variable, so set that first. No key yet? <a href="#key">Get one free</a>. Other clients are <a href="#claude-code">below</a>.</p>
+
+  <figure class="demo" id="demo">
+<pre><code>curl -G <span class="origin">https://calotype.dev</span>/v1/screenshot \
+  -H "Authorization: Bearer $CALOTYPE_KEY" \
+  -d url=https://calotype.dev/pricing -d dark_mode=true -d format=webp \
+  -o pricing.webp</code></pre>
+    <img src="/images/demo-pricing-dark.webp" width="1280" height="800" alt="Calotype's output for that request: the calotype.dev pricing page in dark mode, with Free, Starter and Pro plans side by side. Captured on 20 November 2026.">
+    <figcaption>What that request returns, unedited: the pricing page in dark mode at the default 1280 by 800, a 45 KB WebP. Captured on 20 November 2026 by Calotype's own code with these parameters. Through MCP it is the <code>screenshot</code> tool with <code>url</code> and <code>dark_mode: true</code>, which returns JPEG unless asked for another format.</figcaption>
+  </figure>
+
   <ul class="toc">
     <li><a href="#key">1. Get a key</a></li>
     <li><a href="#claude-code">2. Claude Code</a></li>
     <li><a href="#cursor">Cursor</a></li>
     <li><a href="#vscode">VS Code</a></li>
+    <li><a href="#windsurf">Windsurf</a></li>
+    <li><a href="#claude-desktop">Claude Desktop</a></li>
     <li><a href="#codex">Codex</a></li>
     <li><a href="#n8n">n8n</a></li>
     <li><a href="#other">Other clients</a></li>
@@ -57,6 +74,27 @@
     }
   }
 }</code></pre>
+
+  <h3 id="windsurf">Windsurf</h3>
+  <p>In Cascade's MCP menu, choose <strong>Open MCP config file</strong>. Windsurf takes the address as <code>serverUrl</code> and fills <code>${env:CALOTYPE_KEY}</code> from your environment:</p>
+<pre><code>{
+  "mcpServers": {
+    "calotype": {
+      "serverUrl": "<span class="origin">https://calotype.dev</span>/mcp",
+      "headers": {"Authorization": "Bearer ${env:CALOTYPE_KEY}"}
+    }
+  }
+}</code></pre>
+
+  <h3 id="claude-desktop">Claude Desktop</h3>
+  <p>Claude Desktop adds remote servers as custom connectors in your Claude account, not in a config file. A connector can send an API key only through <strong>Request headers</strong>, which Anthropic describes as a beta open to a limited set of organizations. If your <strong>Add custom connector</strong> dialog has that section (it may sit under <strong>Advanced</strong>):</p>
+  <ul>
+    <li>Customize &gt; Connectors &gt; Add &gt; Add custom connector</li>
+    <li>MCP server URL: <code><span class="origin">https://calotype.dev</span>/mcp</code></li>
+    <li>Authentication: <strong>No sign-in</strong></li>
+    <li>Request headers: name <code>Authorization</code>, value <code>Bearer cal_...</code>. Type the word <code>Bearer</code> and a space yourself; Claude adds nothing</li>
+  </ul>
+  <p>Without that section, Claude Desktop cannot send the key, because Calotype does not offer OAuth sign-in yet. A local bridge such as the community <code>mcp-remote</code> package can add the header from <code>claude_desktop_config.json</code>; Calotype has not tested that. Custom connectors call the server from Anthropic's cloud, not from your computer.</p>
 
   <h3 id="codex">Codex</h3>
   <p>In <code>~/.codex/config.toml</code>. Codex sends the variable's value as the bearer token:</p>

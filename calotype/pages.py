@@ -49,8 +49,8 @@ PAGES: tuple[Page, ...] = (
         "/agents",
         "agents.html",
         "For AI agents: add the screenshot tool | Calotype",
-        "Add Calotype's remote MCP server to Claude Code, Cursor, VS Code or Codex in one step, "
-        "and check it works in a minute.",
+        "Add Calotype's remote MCP server to Cursor or VS Code in one click, or to Claude Code, Windsurf, "
+        "Codex or n8n in one step, and check it works in a minute.",
         nav_label="For agents",
     ),
     Page(
