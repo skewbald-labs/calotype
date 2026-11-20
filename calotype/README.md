@@ -22,9 +22,10 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 | `admin.py` | Key administration CLI |
 | `remote_mcp.py` | Remote MCP server at `/mcp` (streamable HTTP) with one tool, `screenshot` |
 | `mcp_server.py` | Local MCP server (stdio) that calls the API |
+| `install_links.py` | Builds the one-click Cursor and VS Code install links in the README and on `/agents`; `python -m calotype.install_links` prints them with their decoded configs |
 | `plans.json` | Plans and monthly quotas. Prices are provisional |
 | `adblock_domains.txt` | Domains blocked when `block_ads=true` |
-| `pages.py`, `site/` | The public website: `site/layout.html` (shared header and footer) wraps each page in `site/pages/`; `pages.py` lists the routes (`/`, `/docs`, `/pricing`, `/acceptable-use`, `/privacy`, `/terms`, `/refunds`) and serves them with `/robots.txt` and `/sitemap.xml` |
+| `pages.py`, `site/` | The public website: `site/layout.html` (shared header and footer) wraps each page in `site/pages/`; `pages.py` lists the routes (`/`, `/docs`, `/pricing`, `/acceptable-use`, `/privacy`, `/terms`, `/refunds`) and serves them with `/robots.txt` and `/sitemap.xml`, the logo files in `site/brand/` at `/icon.svg` and `/icon.png`, and `site/images/` at `/images/<name>` (the README links there, so add a new name rather than replacing a file) |
 | `tests/` | pytest suite |
 
 ## Run locally
