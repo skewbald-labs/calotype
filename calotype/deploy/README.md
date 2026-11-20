@@ -33,6 +33,10 @@ Billing is off unless you pass `--stripe`. Without it the service has no secret 
 3. Grant the runtime account access to those two secrets only (see below).
 4. Deploy with `STRIPE_PRICE_STARTER=price_... STRIPE_PRICE_PRO=price_... deploy.sh --stripe --public-url https://HOST ...`. Price ids are not secret and go in as plain environment variables. The secrets go in as `--set-secrets` references (`:latest` by default, or `--secret-version N` to pin one).
 
+## Quota emails
+
+Off unless you pass `--email-notices`. It adds the secret `calotype-email-token-secret` (env `EMAIL_TOKEN_SECRET_NAME`) as `CALOTYPE_EMAIL_TOKEN_SECRET`, next to the Stripe ones. Pass it on every deploy once it is on: `gcloud run deploy --set-secrets` replaces the whole list, so a deploy without the flag would remove it. The skewbald-checks job in free-reign (`ops/checks`) reads the same secret to sign the links it sends. Create it once from stdin, with a random value of at least 32 characters, and grant the service's and the job's accounts access to it only (see below).
+
 ## IAM roles
 
 ### Deployer: the person or CI account running `deploy.sh`
@@ -66,6 +70,7 @@ Simplest is to have a project Owner do the first run once, then deploy with `--s
 |---|---|---|
 | `roles/datastore.user` | project | read and write the Firestore documents (keys, usage counts, processed Stripe events) |
 | `roles/secretmanager.secretAccessor` | `calotype-stripe-secret-key` and `calotype-stripe-webhook-secret` only, not the project (`--stripe` only) | Cloud Run resolves the two secret references at start |
+| `roles/secretmanager.secretAccessor` | `calotype-email-token-secret` only (`--email-notices` only) | the same, for the quota-email link secret |
 
 Nothing else. Cloud Run sends stdout to Cloud Logging without a logging role, and the image is pulled by Cloud Run's own service agent. Do not use the Compute Engine default account; `deploy.sh` refuses it.
 

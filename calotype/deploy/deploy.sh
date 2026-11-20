@@ -36,6 +36,8 @@ STRIPE_WEBHOOK_SECRET_NAME="${STRIPE_WEBHOOK_SECRET_NAME:-calotype-stripe-webhoo
 SECRET_VERSION="${SECRET_VERSION:-latest}"
 STRIPE_PRICE_STARTER="${STRIPE_PRICE_STARTER:-}"
 STRIPE_PRICE_PRO="${STRIPE_PRICE_PRO:-}"
+EMAIL_NOTICES=0
+EMAIL_TOKEN_SECRET_NAME="${EMAIL_TOKEN_SECRET_NAME:-calotype-email-token-secret}"
 # With --stripe: STRIPE_AUTOMATIC_TAX=1 turns on Stripe Tax in Checkout. Set it only
 # once the account has a tax registration (Texas) and its head office address.
 DRY_RUN=0
@@ -62,7 +64,10 @@ Options:
   --stripe                     turn billing on: Stripe secrets from Secret Manager, price ids from
                                STRIPE_PRICE_STARTER and STRIPE_PRICE_PRO (environment)
                                (STRIPE_AUTOMATIC_TAX=1 also turns on Stripe Tax in Checkout)
-  --secret-version V           Secret Manager version for the Stripe secrets (default latest)
+  --email-notices              turn quota emails on: CALOTYPE_EMAIL_TOKEN_SECRET from the Secret Manager
+                               secret calotype-email-token-secret (env EMAIL_TOKEN_SECRET_NAME). Pass it on
+                               every deploy once on: a deploy without it removes the secret from the service
+  --secret-version V           Secret Manager version for the secrets (default latest)
   --skip-setup                 skip enabling APIs and creating the repository and database
   --dry-run                    print the gcloud commands, run nothing
   -h, --help                   this text
@@ -143,6 +148,7 @@ while [[ $# -gt 0 ]]; do
     --secret-version) need_value "$@"; SECRET_VERSION="$2"; shift 2 ;;
     --secret-version=*) SECRET_VERSION="${1#*=}"; shift ;;
     --stripe) STRIPE=1; shift ;;
+    --email-notices) EMAIL_NOTICES=1; shift ;;
     --skip-setup) SKIP_SETUP=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -179,7 +185,12 @@ fi
 if [[ $STRIPE -eq 1 ]]; then
   [[ "$STRIPE_PRICE_STARTER" =~ ^price_[A-Za-z0-9]+$ ]] || die "--stripe needs STRIPE_PRICE_STARTER=price_..."
   [[ "$STRIPE_PRICE_PRO" =~ ^price_[A-Za-z0-9]+$ ]] || die "--stripe needs STRIPE_PRICE_PRO=price_..."
+fi
+if [[ $STRIPE -eq 1 || $EMAIL_NOTICES -eq 1 ]]; then
   [[ "$SECRET_VERSION" =~ ^(latest|[1-9][0-9]*)$ ]] || die "--secret-version must be latest or a number"
+fi
+if [[ $EMAIL_NOTICES -eq 1 ]]; then
+  [[ "$EMAIL_TOKEN_SECRET_NAME" =~ ^[A-Za-z0-9_-]{1,255}$ ]] || die "not a secret name: $EMAIL_TOKEN_SECRET_NAME"
 fi
 
 if [[ -z "$TAG" ]]; then
@@ -208,7 +219,7 @@ say "# Image $IMAGE"
 
 if [[ $SKIP_SETUP -eq 0 ]]; then
   apis=(run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com firestore.googleapis.com)
-  if [[ $STRIPE -eq 1 ]]; then
+  if [[ $STRIPE -eq 1 || $EMAIL_NOTICES -eq 1 ]]; then
     apis+=(secretmanager.googleapis.com)
   fi
   run gcloud services enable "${apis[@]}" --project "$PROJECT_ID"
@@ -228,6 +239,9 @@ if [[ $SKIP_SETUP -eq 0 ]]; then
     for secret in "$STRIPE_KEY_SECRET" "$STRIPE_WEBHOOK_SECRET_NAME"; do
       run gcloud secrets describe "$secret" --project "$PROJECT_ID" --format "value(name)"
     done
+  fi
+  if [[ $EMAIL_NOTICES -eq 1 ]]; then
+    run gcloud secrets describe "$EMAIL_TOKEN_SECRET_NAME" --project "$PROJECT_ID" --format "value(name)"
   fi
 else
   say "# --skip-setup: APIs, repository and database are assumed to exist"
@@ -280,10 +294,20 @@ if [[ $STRIPE -eq 1 ]]; then
     [[ "$STRIPE_AUTOMATIC_TAX" =~ ^(1|0|true|false)$ ]] || die "STRIPE_AUTOMATIC_TAX must be 1, 0, true or false"
     env_vars+=",STRIPE_AUTOMATIC_TAX=$STRIPE_AUTOMATIC_TAX"
   fi
-  deploy+=(--set-secrets
-    "STRIPE_SECRET_KEY=$STRIPE_KEY_SECRET:$SECRET_VERSION,STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET_NAME:$SECRET_VERSION")
+  secrets="STRIPE_SECRET_KEY=$STRIPE_KEY_SECRET:$SECRET_VERSION,STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET_NAME:$SECRET_VERSION"
 else
-  # Billing off: no secret references on the service, so the billing endpoints answer 503.
+  # Billing off: no Stripe secret references, so the billing endpoints answer 503.
+  secrets=""
+fi
+if [[ $EMAIL_NOTICES -eq 1 ]]; then
+  # Signs the removal links in quota emails (calotype/notices.py). The mail key is not here:
+  # the skewbald-checks job sends the emails.
+  secrets+="${secrets:+,}CALOTYPE_EMAIL_TOKEN_SECRET=$EMAIL_TOKEN_SECRET_NAME:$SECRET_VERSION"
+fi
+if [[ -n "$secrets" ]]; then
+  # --set-secrets replaces the whole list, so every secret the service uses is named here.
+  deploy+=(--set-secrets "$secrets")
+else
   deploy+=(--clear-secrets)
 fi
 deploy+=(--set-env-vars "$env_vars")
