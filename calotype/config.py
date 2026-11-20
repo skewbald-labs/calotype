@@ -57,6 +57,10 @@ class Settings:
     self_serve_keys: bool = True
     keys_per_ip_per_hour: int = 3
     keys_global_per_hour: int = 200
+    # Free tries on the home page (tries.py): per client IP per hour, in memory
+    # only, and per UTC day for everyone, counted in storage. 0 a day turns them off.
+    tries_per_ip_per_hour: int = 5
+    tries_per_day: int = 300
     # Proxies in front of the app whose X-Forwarded-For entry is trusted.
     # 0 = use the socket peer. Cloud Run: 1.
     trusted_proxy_hops: int = 0
@@ -96,6 +100,8 @@ class Settings:
             self_serve_keys=os.environ.get("CALOTYPE_SELF_SERVE_KEYS", "1") not in ("0", "false", "no"),
             keys_per_ip_per_hour=_env_int("CALOTYPE_KEYS_PER_IP_PER_HOUR", 3),
             keys_global_per_hour=_env_int("CALOTYPE_KEYS_GLOBAL_PER_HOUR", 200),
+            tries_per_ip_per_hour=_env_int("CALOTYPE_TRIES_PER_IP_PER_HOUR", 5),
+            tries_per_day=_env_int("CALOTYPE_TRIES_PER_DAY", 300),
             trusted_proxy_hops=_env_int("CALOTYPE_TRUSTED_PROXY_HOPS", 0),
             public_url=os.environ.get("CALOTYPE_PUBLIC_URL", "").strip().rstrip("/"),
             email_token_secret=os.environ.get("CALOTYPE_EMAIL_TOKEN_SECRET", "").strip(),

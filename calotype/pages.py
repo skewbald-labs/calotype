@@ -122,7 +122,7 @@ def canonical_url(path: str) -> str:
     return SITE_ORIGIN + ("" if path == "/" else path)
 
 
-def _nav(current: Page) -> str:
+def _nav(current: Page | None) -> str:
     links = []
     for page in PAGES:
         if page.nav_label:
@@ -157,15 +157,39 @@ def sale_text(content: str, paid_open: bool) -> str:
     return keep.sub(lambda m: m.group(1), drop.sub("", content))
 
 
-def render_page(page: Page, site_dir: Path, paid_open: bool = True) -> RenderedPage:
+# The home page's try box (site/try-form.html) goes where a page has this marker.
+TRY_FORM_MARK = "<!--try-form-->"
+
+
+@dataclass(frozen=True)
+class TryLimits:
+    """The free-try limits the box states (from Settings); ``per_day`` 0 means tries are off."""
+
+    per_ip_per_hour: int = 5
+    per_day: int = 300
+
+
+def try_form(site_dir: Path, limits: TryLimits, url: str = "") -> str:
+    """The try box: a plain form that posts to /try, with the limits it states filled in."""
+    if limits.per_day <= 0:
+        return ""
+    form = (site_dir / "try-form.html").read_text(encoding="utf-8")
+    form = form.replace("TRIES_PER_IP", f"{limits.per_ip_per_hour:,}").replace("TRIES_PER_DAY", f"{limits.per_day:,}")
+    return form.replace('value=""', f'value="{html.escape(url, quote=True)}"', 1)
+
+
+def render_document(
+    site_dir: Path, *, path: str, title: str, description: str, content: str,
+    current: Page | None = None, draft: bool = False,
+) -> RenderedPage:
+    """Wrap ``content`` in the shared layout and compute its Content-Security-Policy."""
     layout = (site_dir / "layout.html").read_text(encoding="utf-8")
-    content = sale_text((site_dir / "pages" / page.source).read_text(encoding="utf-8"), paid_open)
-    banner = f'<p class="draft-banner" role="note">{html.escape(DRAFT_BANNER)}</p>' if page.draft else ""
+    banner = f'<p class="draft-banner" role="note">{html.escape(DRAFT_BANNER)}</p>' if draft else ""
     fields = {
-        "title": html.escape(page.title),
-        "description": html.escape(page.description),
-        "canonical": html.escape(canonical_url(page.path)),
-        "nav": _nav(page),
+        "title": html.escape(title),
+        "description": html.escape(description),
+        "canonical": html.escape(canonical_url(path)),
+        "nav": _nav(current),
         "draft_banner": banner,
     }
     document = layout
@@ -174,8 +198,17 @@ def render_page(page: Page, site_dir: Path, paid_open: bool = True) -> RenderedP
     # Content last, so nothing in it is taken for a placeholder.
     document = document.replace("{{content}}", content)
     if "{{" in document.replace(content, ""):
-        raise ValueError(f"unfilled placeholder in the layout for {page.path}")
+        raise ValueError(f"unfilled placeholder in the layout for {path}")
     return RenderedPage(document.encode("utf-8"), _csp(document))
+
+
+def render_page(page: Page, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits()) -> RenderedPage:
+    content = sale_text((site_dir / "pages" / page.source).read_text(encoding="utf-8"), paid_open)
+    content = content.replace(TRY_FORM_MARK, try_form(site_dir, tries))
+    return render_document(
+        site_dir, path=page.path, title=page.title, description=page.description, content=content,
+        current=page, draft=page.draft,
+    )
 
 
 def sitemap_xml() -> str:
@@ -189,15 +222,16 @@ def sitemap_xml() -> str:
 
 
 def robots_txt() -> str:
-    return f"User-agent: *\nAllow: /\nDisallow: /v1/\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
+    # /try renders a page on each visit; crawlers have no reason to.
+    return f"User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /try\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
 
 
-def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True) -> None:
+def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits()) -> None:
     """Serve every page in ``PAGES``, plus /robots.txt and /sitemap.xml (GET and HEAD).
 
     ``paid_open`` is whether this server sells paid plans (Stripe is set up); it picks the
-    sale or no-sale text in each page."""
-    rendered = {page.path: render_page(page, site_dir, paid_open) for page in PAGES}
+    sale or no-sale text in each page. ``tries`` are the limits the home page's try box states."""
+    rendered = {page.path: render_page(page, site_dir, paid_open, tries) for page in PAGES}
 
     def page_endpoint(path: str):
         page = rendered[path]

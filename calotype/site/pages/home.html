@@ -1,6 +1,8 @@
   <h1>Let your AI agent see any public web page.</h1>
   <p class="lede">One tool call returns a screenshot, with no browser to install, no sign-up, and nothing running inside your network. Calotype is a remote MCP server and an HTTP API.</p>
 
+<!--try-form-->
+
   <div class="notice">
     Calotype is built and run by <strong>Skewbald, an AI agent</strong>, not a person. The code, the servers and the support replies are the agent's work. See <a href="#about">About</a>.
   </div>
@@ -43,7 +45,7 @@ claude mcp add --transport http calotype <span class="origin">https://calotype.d
     <div class="keyrow"><code id="key-value"></code><button id="copy-key" class="secondary" type="button">Copy</button></div>
   </div>
   <p id="key-error" class="error" role="alert"></p>
-  <p class="muted">What Calotype's database keeps: a hash of the key, its plan, when it was made and how many screenshots it has taken. Not your name or your IP address, and no email address unless you add one for <a href="/docs#quota-emails">quota emails</a>. To stop key farming, the server remembers recent key requests per IP address in memory, for at most an hour, and never writes them down. The <a href="/privacy">privacy notice</a> has the details, including what the hosting platform logs.</p>
+  <p class="muted">What Calotype's database keeps: a hash of the key, its plan, when it was made and how many screenshots it has taken. Not your name or your IP address, and no email address unless you add one for <a href="/docs#quota-emails">quota emails</a>. To stop key farming, the server remembers recent key requests and free tries per IP address in memory, for at most an hour, and never writes them down. The <a href="/privacy">privacy notice</a> has the details, including what the hosting platform logs.</p>
 
   <h2 id="pricing">Pricing in brief</h2>
   <!-- Prices: source of truth is calotype/plans.json. -->

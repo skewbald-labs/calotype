@@ -34,10 +34,11 @@ from .config import SITE_DIR, Settings
 from .logs import log_event, setup_logging
 from .notices import mask_email, normalize_email, notices_enabled, thresholds_at, token_key_id, token_matches
 from .params import ScreenshotParams
-from .pages import SITE_ORIGIN, add_site_routes
+from .pages import SITE_ORIGIN, TryLimits, add_site_routes
 from .remote_mcp import RemoteMCP
 from .ratelimit import SWEEP_INTERVAL_S, SlidingWindowLimiter, client_ip
 from .ssrf import AddressPolicy, BlockedTarget
+from .tries import add_try_routes
 from .storage import (
     REF_LABEL_PREFIX,
     REF_TAG,
@@ -182,11 +183,12 @@ def create_app(
             await renderer.stop()
 
     async def sweep_limiters():
-        # Forget IP addresses the key-creation limit no longer needs; see ratelimit.py.
+        # Forget IP addresses the key-creation and try limits no longer need; see ratelimit.py.
         while True:
             await asyncio.sleep(SWEEP_INTERVAL_S)
             app.state.key_limiter.sweep()
             app.state.key_global_limiter.sweep()
+            app.state.try_limiter.sweep()
 
     app = FastAPI(
         title="Calotype",
@@ -206,6 +208,8 @@ def create_app(
     # In-memory only; see ratelimit.py. IPs are never stored or logged.
     app.state.key_limiter = SlidingWindowLimiter(settings.keys_per_ip_per_hour)
     app.state.key_global_limiter = SlidingWindowLimiter(settings.keys_global_per_hour)
+    # Free tries on the home page (tries.py), per client IP; in memory only, like the above.
+    app.state.try_limiter = SlidingWindowLimiter(settings.tries_per_ip_per_hour)
 
     @app.exception_handler(ApiError)
     async def _api_error(_request: Request, exc: ApiError):
@@ -667,6 +671,9 @@ def create_app(
         }
 
     if settings.serve_site and SITE_DIR.is_dir():
-        add_site_routes(app, SITE_DIR, paid_open=billing.configured)
+        tries = TryLimits(settings.tries_per_ip_per_hour, settings.tries_per_day)
+        add_site_routes(app, SITE_DIR, paid_open=billing.configured, tries=tries)
+        # The home page's try box: a capture with no key, under its own limits.
+        add_try_routes(app, settings=settings, policy=policy, renderer=renderer, site_dir=SITE_DIR)
 
     return app
