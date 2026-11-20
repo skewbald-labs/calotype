@@ -232,6 +232,7 @@
       <tr><td>400</td><td><code>invalid_pack</code></td><td>The pack is not one that can be bought. Adds <code>packs</code>, the ones that can.</td></tr>
       <tr><td>402</td><td><code>payment_required</code></td><td>No payment was sent. Pay the challenge in <code>WWW-Authenticate</code>.</td></tr>
       <tr><td>402</td><td><code>malformed_credential</code>, <code>invalid_challenge</code>, <code>payment_expired</code>, <code>verification_failed</code></td><td>The credential was refused: it cannot be read, belongs to another key, pack or price, is older than five minutes, or Stripe declined the payment. Nothing was charged. A new challenge is in <code>WWW-Authenticate</code>.</td></tr>
+      <tr><td>429</td><td><code>rate_limited</code></td><td>The key sent too many payment credentials in an hour (10 by default). Asking for a challenge is not limited. Adds <code>retry_after_s</code>, and the <code>Retry-After</code> header.</td></tr>
       <tr><td>502</td><td><code>payment_unconfirmed</code></td><td>Stripe has not confirmed the payment yet. Send the same request with the same credential again; it cannot charge twice.</td></tr>
       <tr><td>502</td><td><code>billing_error</code></td><td>Stripe could not take the payment. Try again shortly.</td></tr>
       <tr><td>503</td><td><code>billing_unavailable</code></td><td>Prepaid credit is switched off on this server.</td></tr>

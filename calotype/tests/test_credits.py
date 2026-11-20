@@ -700,6 +700,24 @@ def test_a_header_that_is_not_a_payment_credential_is_just_unpaid(cclient, free_
     assert r.status_code == 402 and r.json()["error"]["code"] == "payment_required"
 
 
+def test_one_key_can_send_only_so_many_credentials_an_hour(settings, store, fake_renderer, credits, payments):
+    """Every credential that passes the checks is a call to Stripe; a free key must not get unlimited ones."""
+    raw, key = store.create_key("free")
+    other, _ = store.create_key("free")
+    payments.fail_with = stripe.InvalidRequestError("No such token", "shared_payment_granted_token", http_status=400)
+    with make_client(settings, store, fake_renderer, credits, credit_payments_per_key_per_hour=3) as c:
+        for n in range(3):
+            assert_refused(pay(c, raw, spt=f"spt_guess_{n}")[2], "verification_failed")
+        r = pay(c, raw, spt="spt_guess_3")[2]
+        assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
+        assert int(r.headers["retry-after"]) > 0 and r.json()["error"]["retry_after_s"] > 0
+        assert payments.create.call_count == 3  # the fourth never reached Stripe
+        # Asking for a challenge stays free, and another key is not affected.
+        assert ask(c, raw).status_code == 402
+        payments.fail_with = None
+        assert pay(c, other)[2].status_code == 200
+
+
 # --- what Stripe can answer --------------------------------------------------------------------------------
 
 

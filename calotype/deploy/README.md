@@ -53,6 +53,7 @@ An agent buys a pack of screenshots (one pack: 5,000 for $19, in `plans.json` un
 | `MPP_REALM` | no | the challenge realm, if it should not be the public host |
 | `STRIPE_MPP_API_VERSION` | no | default `2026-07-29.preview`, the version `mppx` 0.21.1 sends |
 | `STRIPE_SPT_PAYMENT_METHOD_TYPES` | no | default `card,link` |
+| `CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR` | no | default 10. Payment credentials one key may send in an hour; each one that passes the checks is a call to Stripe. Counted in memory, per instance. Over it: 429 `rate_limited` |
 | `CALOTYPE_CREDITS_STABLECOIN` | no | **not built.** `1` only logs a warning at startup; nothing is offered for it |
 
 Deploy: `STRIPE_PROFILE_ID=profile_... deploy.sh --stripe --credits --public-url https://HOST ...` adds `CALOTYPE_CREDITS=1`, `CALOTYPE_CREDITS_CARD=1` and `STRIPE_PROFILE_ID` to the service. Without `--credits` the service is deployed exactly as before.

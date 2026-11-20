@@ -142,7 +142,9 @@ Quota counts one screenshot per call, per key, per calendar month in UTC. A call
 - **Use:** the month's plan quota is used first, then credit, one per screenshot (`X-Calotype-Credits` on the response). Credit does not expire or reset. `GET /v1/usage` reports it as `credits`. Credit already bought keeps working if the endpoint is switched off again.
 - **Not built:** stablecoin payments. `CALOTYPE_CREDITS_STABLECOIN=1` only logs a warning.
 
-Errors: 400 `invalid_pack`, `invalid_json`; 402 `payment_required`, and for a refused credential `malformed_credential`, `invalid_challenge`, `payment_expired`, `verification_failed`, each with a new challenge; 502 `payment_unconfirmed` (Stripe gave no answer; the same credential may be sent again), `billing_error`; 503 `billing_unavailable`. Settings, the steps a person must take in Stripe, what is unverified, and refunds are in `deploy/README.md`, "Prepaid credit". The sandbox run is in `deploy/stripe-sandbox/README.md`.
+A key may send 10 payment credentials an hour (`CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR`; in memory, per instance), because each one that passes the checks makes a call to Stripe; asking for a challenge is not limited.
+
+Errors: 400 `invalid_pack`, `invalid_json`; 429 `rate_limited`; 402 `payment_required`, and for a refused credential `malformed_credential`, `invalid_challenge`, `payment_expired`, `verification_failed`, each with a new challenge; 502 `payment_unconfirmed` (Stripe gave no answer; the same credential may be sent again), `billing_error`; 503 `billing_unavailable`. Settings, the steps a person must take in Stripe, what is unverified, and refunds are in `deploy/README.md`, "Prepaid credit". The sandbox run is in `deploy/stripe-sandbox/README.md`.
 
 ## How SSRF is blocked
 
@@ -207,6 +209,7 @@ It runs from a checkout of this repo (the working directory must contain `caloty
 | `CALOTYPE_SELF_SERVE_KEYS` | 1 | 0 turns off `POST /v1/keys` |
 | `CALOTYPE_KEYS_PER_IP_PER_HOUR` | 3 | self-serve keys per client IP |
 | `CALOTYPE_KEYS_GLOBAL_PER_HOUR` | 200 | self-serve keys overall |
+| `CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR` | 10 | payment credentials one key may send to `POST /v1/credits` |
 | `CALOTYPE_TRUSTED_PROXY_HOPS` | 0 | proxies whose `X-Forwarded-For` entry is trusted. Set 1 on Cloud Run |
 | `CALOTYPE_LOG_LEVEL` | INFO | |
 | `CALOTYPE_SERVE_SITE` | 1 | 0 to skip the landing page |

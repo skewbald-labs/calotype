@@ -4,3 +4,7 @@ pytest==9.2.0
 iniconfig==2.3.1
 pluggy==1.7.0
 Pygments==2.21.0
+# Optional, not installed by this file: pympp, the official Python SDK of the Machine Payments
+# Protocol. With it, four more tests let that SDK parse, verify and pay what mpp.py and
+# /v1/credits produce; without it they are skipped. It is not a runtime dependency.
+#   pip install --no-deps pympp==0.26.0 rfc8785==0.1.4

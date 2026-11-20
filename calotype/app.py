@@ -177,6 +177,7 @@ def create_app(
             await asyncio.sleep(SWEEP_INTERVAL_S)
             app.state.key_limiter.sweep()
             app.state.key_global_limiter.sweep()
+            app.state.credit_limiter.sweep()
 
     app = FastAPI(
         title="Calotype",
@@ -196,6 +197,7 @@ def create_app(
     app.state.credits = credits
     # In-memory only; see ratelimit.py. IPs are never stored or logged.
     app.state.key_limiter = SlidingWindowLimiter(settings.keys_per_ip_per_hour)
+    app.state.credit_limiter = SlidingWindowLimiter(settings.credit_payments_per_key_per_hour)
     app.state.key_global_limiter = SlidingWindowLimiter(settings.keys_global_per_hour)
 
     @app.exception_handler(ApiError)
@@ -595,7 +597,7 @@ def create_app(
         }
 
     def payment_challenge(
-        request: Request, key: ApiKey, pack: CreditPack, realm: str, header: str, problem: str, detail: str
+        key: ApiKey, pack: CreditPack, realm: str, header: str, problem: str, detail: str
     ) -> JSONResponse:
         """402 with a new challenge: the first answer, and the answer to a credential that was refused."""
         challenge = credits.challenge(key, pack, realm=realm, header=header)
@@ -653,15 +655,24 @@ def create_app(
         header = mpp.PAYMENT_AUTHORIZATION if request.state.key_in_header else ""
         credential = request.headers.get(header.lower() if header else "authorization", "")
         if mpp.payment_credential(credential) is None:
-            return payment_challenge(
-                request, key, pack, realm, header, "payment-required", "Payment is required for this pack."
+            return payment_challenge(key, pack, realm, header, "payment-required", "Payment is required for this pack.")
+        # Asking for a challenge is free and unlimited. Sending credentials is not: each one that
+        # passes the checks makes Calotype call Stripe, so one key gets only so many an hour.
+        ok, retry = app.state.credit_limiter.check(str(key.id))
+        if not ok:
+            raise ApiError(
+                429,
+                "rate_limited",
+                "This key has sent too many payment credentials recently. Try again later.",
+                {"Retry-After": str(retry)},
+                retry_after_s=retry,
             )
         try:
             paid = await asyncio.to_thread(
                 credits.settle, key, pack, credential, app.state.storage, realm=realm, header=header
             )
         except PaymentRefused as e:
-            return payment_challenge(request, key, pack, realm, header, e.problem, e.detail)
+            return payment_challenge(key, pack, realm, header, e.problem, e.detail)
         except PaymentUnconfirmed:
             raise ApiError(
                 502,
