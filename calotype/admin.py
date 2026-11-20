@@ -10,6 +10,7 @@
     python -m calotype.admin usage 3
     python -m calotype.admin contacts
     python -m calotype.admin remove-email 3            (or an address: every key that holds it)
+    python -m calotype.admin tries [--days 7]          (the home page's free tries, per UTC day)
 
 Keys made here are marked internal and never count as demand-test contacts.
 ``mark-internal`` does the same for a test key made through the website's
@@ -33,17 +34,22 @@ Revoking a key also removes its email address.
 ``remove-email`` is for a holder who replies "stop" to a quota notice: given
 an address, it removes it from every key that holds it; given a key id, from
 that key. It never prints the address.
+
+``tries`` prints the daily counts of the home page's free tries, newest day
+first: every try, those rendered (the count the daily cap applies to), and how
+they ended. The counts are all there is: no URL, host or IP address is stored.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import UTC, datetime, timedelta
 
 from .billing import ALREADY_ENDED, CANCELED, CANCELS_AT_PERIOD_END, BillingProviderError, stripe_for_admin
 from .config import Settings
 from .notices import normalize_email
-from .storage import ApiKey, current_month, open_configured_storage
+from .storage import ApiKey, TryDay, current_day, current_month, open_configured_storage
 
 # Replaced in tests with a provider over a fake Stripe client.
 open_billing = stripe_for_admin
@@ -124,6 +130,13 @@ def _add_stripe_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _positive_int(text: str) -> int:
+    n = int(text)
+    if not 1 <= n <= 366:
+        raise argparse.ArgumentTypeError("give a number of days from 1 to 366")
+    return n
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m calotype.admin", description="Manage Calotype API keys.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -163,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
 
     e = sub.add_parser("remove-email", help="remove the quota-notice address from a key id, or from every key with an address")
     e.add_argument("target", help="a key id, or an email address")
+
+    t = sub.add_parser("tries", help="daily counts of the home page's free tries, newest first")
+    t.add_argument("--days", type=_positive_int, default=7, help="how many UTC days to show, today included (default 7)")
 
     args = parser.parse_args(argv)
     settings = Settings.from_env()
@@ -290,6 +306,15 @@ def main(argv: list[str] | None = None) -> int:
             print("no key holds that address" if "@" in target else "that key has no address", file=sys.stderr)
             return 1
         print(f"removed the address from key(s) {', '.join(map(str, ids))}", file=sys.stderr)
+        return 0
+
+    if args.cmd == "tries":
+        today = datetime.now(UTC)
+        days = [current_day(today - timedelta(days=n)) for n in range(args.days)]
+        names = [f for f in TryDay.__dataclass_fields__ if f != "day"]
+        print("day\t" + "\t".join(names))
+        for d in store.try_days(days):
+            print(d.day + "\t" + "\t".join(str(getattr(d, n)) for n in names))
         return 0
 
     if args.cmd == "usage":
