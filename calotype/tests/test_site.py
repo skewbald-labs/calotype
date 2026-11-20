@@ -622,3 +622,20 @@ def test_readme_first_screen_matches_the_generated_links_and_the_served_image():
         assert client in readme, client
     assert "calotype.dev/agents#n8n" in readme
     assert re.search(r"cal_[A-Za-z0-9]{8,}", readme) is None
+
+
+# --- free tries ------------------------------------------------------------------------------
+
+
+def test_free_tries_in_docs_and_policies_match_the_code(site, settings):
+    from calotype import tries
+
+    docs = site.get("/docs").text
+    assert f"at most {settings.tries_per_ip_per_hour} tries an hour from one IP address" in docs
+    assert f"at most {settings.tries_per_day} renders a day across the whole service" in docs
+    assert f"{tries.WIDTH} × {tries.HEIGHT}, not full page, JPEG at quality {tries.QUALITY} with ads blocked" in docs
+    privacy = site.get("/privacy").text
+    assert 'id="tries"' in privacy
+    assert "only to limit key creation and free tries" in privacy
+    assert "keeps neither the address nor the image" in privacy
+    assert "applies to the free tries on the home page" in site.get("/acceptable-use").text

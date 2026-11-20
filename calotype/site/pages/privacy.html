@@ -9,7 +9,8 @@
   <ul>
     <li>No account, no name, no email address is needed for a free key. You may add an email address to a key, only to be told when it nears its monthly quota.</li>
     <li>Calotype stores a hash of your key and counts of what it has done, not the key, not the pages you capture, and not the images.</li>
-    <li>Your IP address is held in memory for at most an hour, only to limit key creation, and never written down by Calotype.</li>
+    <li>Your IP address is held in memory for at most an hour, only to limit key creation and free tries, and never written down by Calotype.</li>
+    <li>A free try on the home page renders the page you name and shows you the image once. The address and the image are not kept; tries are only counted per day.</li>
     <li>No cookies, no analytics, no trackers, nothing loaded from other sites.</li>
     <li>Payment details are handled by Stripe, not by Calotype.</li>
   </ul>
@@ -27,6 +28,7 @@
     <li>only if you gave one, an email address for <a href="#quota-emails">quota emails</a>, and a record of each quota email queued for the key.</li>
   </ul>
   <p>It also keeps the ids of the Stripe webhook events it has handled, so that a repeated event is not applied twice. Those ids say nothing about you.</p>
+  <p>For the <a href="#tries">free tries</a>, it keeps one record per day (UTC) with counts only: how many tries there were, how many were rendered, and how many succeeded, failed, were refused, were over the hourly limit or came after the daily limit. No address, host, IP address or image.</p>
   <p>That is all. There is no name, IP address, address of a captured page or image in the database, and no email address unless you added one.</p>
 
   <h2 id="quota-emails">Quota emails (optional)</h2>
@@ -38,10 +40,14 @@
   <p><strong>How to remove it.</strong> Open the link at the end of any quota email; it removes the address at once. Or reply "stop" to the email, or call <code>DELETE /v1/keys/email</code> with the key, or write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
 
   <h2 id="ip">IP addresses</h2>
-  <p>To stop one person from making keys by the hundred, the server counts recent key requests per IP address. That count lives in the server's memory only. An address is forgotten at most an hour after its last key request, and all of them are gone when the server restarts. Calotype never writes an IP address to its database, its logs or a file. Screenshot calls do not look at your IP address at all.</p>
+  <p>To stop one person from making keys by the hundred, the server counts recent key requests per IP address. It counts <a href="#tries">free tries</a> per IP address the same way, to hold each address to its hourly limit. Those counts live in the server's memory only. An address is forgotten at most an hour after its last key request or try, and all of them are gone when the server restarts. Calotype never writes an IP address to its database, its logs or a file. Screenshot calls made with a key do not look at your IP address at all.</p>
+
+  <h2 id="tries">Free tries</h2>
+  <p>The box on the home page takes a screenshot with no key. Calotype uses the address you paste to render that page once, sends the image back inside the answer page, and keeps neither the address nor the image. The answer page tells browsers not to cache it.</p>
+  <p>What is kept: the day's counts described <a href="#stored">above</a>, and one log line per try, like a screenshot's, with the scheme and host of the page (such as <code>https://example.com</code>) and how the try ended. Your IP address is held in memory for at most an hour, as described above, and is not in the counts or the logs. The form sends the address in the body of the request, not in the request line.</p>
 
   <h2 id="logs">What Calotype logs</h2>
-  <p>Calotype writes one log line per request, to Google Cloud Logging, with: a random request id, the method and path (without the query string), the status, how long it took, the key's internal number, and for screenshots the scheme and host of the page, such as <code>https://example.com</code>. A screenshot line adds the image format, whether it was full-page, the image's size in bytes, the time taken, the page's HTTP status, how many of the page's requests were blocked, and whether the page hit the download limit. Billing events log the key's number, the plan and Stripe's ids.</p>
+  <p>Calotype writes one log line per request, to Google Cloud Logging, with: a random request id, the method and path (without the query string), the status, how long it took, the key's internal number, and for screenshots the scheme and host of the page, such as <code>https://example.com</code>. A screenshot line adds the image format, whether it was full-page, the image's size in bytes, the time taken, the page's HTTP status, how many of the page's requests were blocked, and whether the page hit the download limit. A free try logs a line of the same kind, with how the try ended and no key number. Billing events log the key's number, the plan and Stripe's ids.</p>
   <p>Calotype's logs never contain your key, the full address you captured, its path or query, your IP address, your email address or your request headers. Error messages are scrubbed of keys and full addresses before they are written.</p>
 
   <h2 id="platform">What the hosting platform logs</h2>

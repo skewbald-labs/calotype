@@ -154,6 +154,7 @@
     <li><strong>What counts.</strong> Only a capture that returns an image. Rejected requests (bad parameters, bad key, refused address, over quota) and failed captures (unreachable page, timeout, busy, internal error) are not counted.</li>
     <li><strong>Over the limit.</strong> Calls answer <code>429 quota_exceeded</code> until the reset. There are no overage charges.</li>
     <li><strong>Key creation.</strong> At most 3 keys an hour from one IP address, and at most 200 an hour across the whole service. Over either limit, <code>POST /v1/keys</code> answers <code>429 rate_limited</code> with <code>Retry-After</code>.</li>
+    <li><strong>Free tries.</strong> The box on the <a href="/#try-form">home page</a> takes a screenshot with no key: at most 5 tries an hour from one IP address, and at most 300 renders a day across the whole service, reset at 00:00 UTC. A try is always 1280 × 800, not full page, JPEG at quality 70 with ads blocked, under the same address rules and time limit as a call with a key. The API has no keyless calls.</li>
     <li><strong>Concurrency.</strong> Each server renders a few pages at a time. A request that waits more than 10 seconds for a free renderer answers <code>503 busy</code>.</li>
     <li><strong>Time.</strong> 30 seconds per capture, from start to encoded image.</li>
   </ul>
