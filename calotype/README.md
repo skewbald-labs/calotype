@@ -8,7 +8,7 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 
 | Path | What it is |
 |---|---|
-| `app.py` | FastAPI app: `/v1/screenshot` (GET and POST), `/v1/keys`, `/v1/usage`, `/v1/plans`, `/v1/billing/*`, `/health` (also `/healthz`; Cloud Run keeps `/healthz` for itself on run.app addresses), and the website (`pages.py`) |
+| `app.py` | FastAPI app: `/v1/screenshot` (GET and POST), `/v1/keys`, `/v1/usage`, `/v1/plans`, `/v1/billing/*`, `/v1/credits`, `/health` (also `/healthz`; Cloud Run keeps `/healthz` for itself on run.app addresses), and the website (`pages.py`) |
 | `capture.py` | One Chromium, a fresh context per capture, a semaphore for concurrency |
 | `egress.py` | The per-capture forward proxy that is Chromium's only route to the network |
 | `ssrf.py` | The address rule: what may be fetched |
@@ -17,11 +17,13 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 | `firestore_storage.py` | The same `Storage` in Google Cloud Firestore, for Cloud Run (`CALOTYPE_STORAGE=firestore`) |
 | `ratelimit.py` | In-memory limit on self-serve key creation |
 | `billing.py` | Stripe Checkout, customer portal and webhook handling (off unless the Stripe variables are set) |
+| `credits.py` | Prepaid screenshots bought by an agent through Stripe machine payments, `POST /v1/credits` (off unless `CALOTYPE_CREDITS=1` and its settings are set) |
+| `mpp.py` | The Machine Payments Protocol's wire format: the 402 challenge, the credential, the receipt |
 | `deploy/` | Cloud Build config, `deploy.sh` for Cloud Run, and the IAM roles and cost notes (`deploy/README.md`) |
 | `admin.py` | Key administration CLI |
 | `remote_mcp.py` | Remote MCP server at `/mcp` (streamable HTTP) with one tool, `screenshot` |
 | `mcp_server.py` | Local MCP server (stdio) that calls the API |
-| `plans.json` | Plans and monthly quotas. Prices are provisional |
+| `plans.json` | Plans and monthly quotas, and the prepaid packs (`credit_packs`). Prices are provisional |
 | `adblock_domains.txt` | Domains blocked when `block_ads=true` |
 | `pages.py`, `site/` | The public website: `site/layout.html` (shared header and footer) wraps each page in `site/pages/`; `pages.py` lists the routes (`/`, `/docs`, `/pricing`, `/acceptable-use`, `/privacy`, `/terms`, `/refunds`) and serves them with `/robots.txt` and `/sitemap.xml` |
 | `tests/` | pytest suite |
@@ -130,6 +132,18 @@ Billing errors: 400 `invalid_plan`, `invalid_json`, `invalid_webhook`; 404 `no_b
 
 Quota counts one screenshot per call, per key, per calendar month in UTC. A call is counted before rendering and refunded if it fails, so failed captures are free. Refused URLs are rejected before counting.
 
+### Prepaid credit (Stripe machine payments; off by default)
+
+`POST /v1/credits` with a key and `{"pack": "starter"}` lets an agent buy 5,000 screenshots for $19 with no person and no checkout page, over the Machine Payments Protocol (MPP). It has never run against Stripe and is off unless `CALOTYPE_CREDITS=1` and its settings are set; then it is also listed in `/openapi.json` and the packs in `/v1/plans`. Off, it answers 503 `billing_unavailable`.
+
+- **Unpaid:** 402 with `WWW-Authenticate: Payment ...`, a challenge for the pack's price (method `stripe`, intent `charge`, amount in cents, the Stripe profile id), valid five minutes and bound to the key and the pack by an HMAC id. The body is problem details plus the usual `error` object.
+- **Paid:** the same request with the credential in `Payment-Authorization: Payment <base64url>` (the key stays in `Authorization`; with the key in `?access_key=` the credential goes in `Authorization`). The credential holds a Stripe shared payment token. Calotype creates and confirms one PaymentIntent with it and, if it succeeded, adds the pack: 200 with `credits` (the new balance) and a `Payment-Receipt` header.
+- **Once:** the purchase is stored under the PaymentIntent id in the same atomic step that adds the screenshots. The same credential again, the `payment_intent.succeeded` webhook, or a webhook replay add nothing more.
+- **Use:** the month's plan quota is used first, then credit, one per screenshot (`X-Calotype-Credits` on the response). Credit does not expire or reset. `GET /v1/usage` reports it as `credits`. Credit already bought keeps working if the endpoint is switched off again.
+- **Not built:** stablecoin payments. `CALOTYPE_CREDITS_STABLECOIN=1` only logs a warning.
+
+Errors: 400 `invalid_pack`, `invalid_json`; 402 `payment_required`, and for a refused credential `malformed_credential`, `invalid_challenge`, `payment_expired`, `verification_failed`, each with a new challenge; 502 `payment_unconfirmed` (Stripe gave no answer; the same credential may be sent again), `billing_error`; 503 `billing_unavailable`. Settings, the steps a person must take in Stripe, what is unverified, and refunds are in `deploy/README.md`, "Prepaid credit". The sandbox run is in `deploy/stripe-sandbox/README.md`.
+
 ## How SSRF is blocked
 
 The rule (`ssrf.py`) allows only public unicast addresses. It refuses loopback, private (RFC 1918), CGNAT, link-local and cloud metadata (169.254.169.254, `fd00:ec2::254`, 100.100.100.200), unique-local `fc00::/7`, multicast, reserved, documentation and benchmarking ranges, IPv4-mapped, NAT64 and 6to4 forms that embed a blocked IPv4 address, IPv6 zone IDs, and anything Python's `ipaddress` does not call global. Names such as `localhost`, `*.internal` and `metadata.google.internal` are refused before any lookup. Legacy IPv4 forms that browsers accept (`2130706433`, `0x7f.1`, `0177.0.0.1`) are parsed as addresses. Below port 1024, only 80 and 443 are allowed. A host is refused if any of its DNS records is disallowed.
@@ -147,15 +161,15 @@ The only way past the rule is `AddressPolicy.exceptions`, a set of exact `(ip, p
 ## Keys, privacy and the demand-test contacts
 
 - **Self-serve keys.** `POST /v1/keys`, or the button on the landing page, creates a free-plan key and returns it once. It asks for nothing: no email, no name, no account.
-- **What is stored.** In either backend (SQLite or Firestore), for each key: the SHA-256 hash (never the key), plan, creation time, an `internal` flag, an optional operator label (CLI keys only), a lifetime count of successful screenshots, per-month usage counts, a revocation time, and, once a key has paid, its Stripe customer id and subscription id. Also the ids of Stripe events already handled. No IP address, email or name is stored anywhere (Stripe holds the buyer's details), and logs carry no IPs.
+- **What is stored.** In either backend (SQLite or Firestore), for each key: the SHA-256 hash (never the key), plan, creation time, an `internal` flag, an optional operator label (CLI keys only), a lifetime count of successful screenshots, per-month usage counts, a revocation time, and, once a key has paid, its Stripe customer id and subscription id. Also the ids of Stripe events already handled. For prepaid credit: the key's balance, and per purchase the Stripe PaymentIntent id, pack, amount and times. No IP address, email or name is stored anywhere (Stripe holds the buyer's details), and logs carry no IPs.
 - **Rate limit.** Key creation is limited to 3 per client IP per hour and 200 per hour overall. Both limits live only in process memory (`ratelimit.py`), are never persisted or logged, and reset when the process restarts. With several instances, each instance keeps its own count.
 - **Contact ordinal.** A "contact" is a non-internal key with at least one successful screenshot. Its ordinal is its creation order among those keys. Keys made with `python -m calotype.admin create-key` are `internal` and never count. A test key made through the public button (such as key 1 on the live service) is marked the same way with `python -m calotype.admin mark-internal ID`. The demand test counts the first 20. List them with `python -m calotype.admin contacts`. The API also logs `first successful screenshot` with the ordinal when a key becomes a contact. The ordinal is derived on read, so a key created earlier that takes its first screenshot later moves ahead of later-created keys.
 
-Other CLI commands: `list-keys`, `revoke-key ID`, `delete-key ID`, `key-id`, `mark-internal ID`, `set-plan ID PLAN`, `usage ID`.
+Other CLI commands: `list-keys`, `revoke-key ID`, `delete-key ID`, `key-id`, `mark-internal ID`, `set-plan ID PLAN`, `usage ID`, `credits ID`, `refund-credit pi_...` (prepaid credit; see `deploy/README.md`).
 
 `revoke-key` on a paid key cancels its Stripe subscription first: at once, with no prorated refund, or with `--at-period-end` at the end of the month already paid for. It needs `STRIPE_SECRET_KEY` in the environment and refuses without it, unless `--no-stripe` is given; then it revokes the key and warns that the subscription must be cancelled by hand. Running it again on a revoked key that still has a subscription retries the cancellation.
 
-`delete-key ID` handles a request to delete a key's record (the privacy notice promises it within 7 days). Without `--yes` it only prints what it would delete. With `--yes` it cancels a paid key's subscription exactly as `revoke-key` does (same `--at-period-end` and `--no-stripe` flags), then deletes the key's record and all its usage counts on either backend, and prints a note that Stripe keeps its own payment records. Ids are not reused. To find a key's id from the key someone sent, pipe the key into `python -m calotype.admin key-id` (it reads standard input, so the key stays out of the shell history).
+`delete-key ID` handles a request to delete a key's record (the privacy notice promises it within 7 days). Without `--yes` it only prints what it would delete. With `--yes` it cancels a paid key's subscription exactly as `revoke-key` does (same `--at-period-end` and `--no-stripe` flags), then deletes the key's record, all its usage counts, its prepaid credit and its purchase records on either backend, and prints a note that Stripe keeps its own payment records. Ids are not reused. To find a key's id from the key someone sent, pipe the key into `python -m calotype.admin key-id` (it reads standard input, so the key stays out of the shell history).
 
 ## MCP server
 
@@ -200,6 +214,9 @@ It runs from a checkout of this repo (the working directory must contain `caloty
 | `STRIPE_SECRET_KEY` | | Stripe API secret key. Secret: Secret Manager on Cloud Run; a local secret store when run by hand |
 | `STRIPE_WEBHOOK_SECRET` | | the webhook endpoint's signing secret (`whsec_...`). Secret |
 | `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PRO` | | the monthly Price ids for each plan |
+| `CALOTYPE_CREDITS`, `CALOTYPE_CREDITS_CARD` | off | `1` and `1` turn on `POST /v1/credits` (prepaid credit, cards through shared payment tokens). Also needs `STRIPE_SECRET_KEY` and `STRIPE_PROFILE_ID` |
+| `STRIPE_PROFILE_ID` | | the Stripe profile id (`profile_...`) that buyers' tokens are granted to. Not secret |
+| `MPP_SECRET_KEY`, `MPP_REALM`, `STRIPE_MPP_API_VERSION`, `STRIPE_SPT_PAYMENT_METHOD_TYPES` | derived, the public host, `2026-07-29.preview`, `card,link` | optional; see `deploy/README.md` |
 | `CALOTYPE_API_KEY`, `CALOTYPE_API_URL` | | MCP server only |
 
 No secrets are needed to run the API. Billing needs all four `STRIPE_*` variables; with any missing it stays off and `/v1/billing/*` answers 503. Firestore uses the environment's default Google credentials (on Cloud Run, the service's service account); no key file is used, and none belongs in this repo. The landing-page prices are provisional (a comment in the HTML says so). `plans.json` is the source of truth for quotas.
@@ -224,7 +241,7 @@ calotype/deploy/deploy.sh --dry-run --project PROJECT_ID \
   - Give the Cloud Run service its own service account and grant it **`roles/datastore.user`** on the project (`gcloud projects add-iam-policy-binding PROJECT_ID --member=serviceAccount:calotype-run@PROJECT_ID.iam.gserviceaccount.com --role=roles/datastore.user`). That role reads and writes documents and nothing more. The client finds the credentials itself through the metadata server; do not create or mount a key file.
   - `CALOTYPE_FIRESTORE_PROJECT` is only needed if the database is in another project than the service. `CALOTYPE_FIRESTORE_COLLECTION_PREFIX` (default `calotype_`) separates, say, staging from production in one database.
   - No index needs deploying: every query uses one field, which Firestore indexes automatically.
-  - Cost: a successful screenshot is 2 document reads (key lookup, quota check) and 2 writes (count, lifetime success); a failed capture adds one write for the refund; a refusal at the quota is 1 read and no write; a new key is 2 writes. Firestore's free tier is 50,000 reads and 20,000 writes a day and 1 GiB stored, so about 10,000 screenshots a day cost nothing.
+  - Cost: a successful screenshot is 2 document reads (key lookup, quota check) and 2 writes (count, lifetime success); a failed capture adds one write for the refund; a refusal at the quota is 2 reads (the count, then the prepaid credit) and no write; a screenshot paid from prepaid credit is one more read and one write than usual; a new key is 2 writes. Firestore's free tier is 50,000 reads and 20,000 writes a day and 1 GiB stored, so about 10,000 screenshots a day cost nothing.
   - With Firestore, keys and quotas are shared across instances, so `--max-instances` can go above 1. The key-creation rate limit and the concurrency limit stay per instance.
   - Without Firestore, the fallback is one instance (`--max-instances 1`) with SQLite on a mounted volume, accepting the risk of loss.
 - `/health` and `/healthz` return 503 if Chromium is not connected. Use either as the startup and liveness probe; from outside a run.app address, only `/health` reaches the app.
@@ -234,6 +251,7 @@ calotype/deploy/deploy.sh --dry-run --project PROJECT_ID \
 ## Known gaps
 
 - Billing is tested against a mocked Stripe client. Live Stripe has run since 17 November 2026; a server without Stripe settings keeps billing off (503). `plans.json` prices must be kept equal to the Stripe Prices by hand.
+- Prepaid credit (`credits.py`) is tested against a mocked Stripe client and the protocol's published examples only. It has never run against Stripe, sandbox or live, or been paid by a real wallet. Stablecoin payment is not built. `deploy/README.md` lists what is unverified.
 - The Stripe processed-event list grows without bound (one small row per event). Firestore TTL or a periodic delete can trim it later.
 - The Firestore backend is tested against the Firestore emulator only, not against a real Firestore database. Nothing moves data from SQLite to Firestore (there is no deployed data to move).
 - The image is built by Cloud Build (`deploy/cloudbuild.yaml`), not locally; the Playwright base image is about 2 GB.

@@ -38,6 +38,10 @@ STRIPE_PRICE_STARTER="${STRIPE_PRICE_STARTER:-}"
 STRIPE_PRICE_PRO="${STRIPE_PRICE_PRO:-}"
 # With --stripe: STRIPE_AUTOMATIC_TAX=1 turns on Stripe Tax in Checkout. Set it only
 # once the account has a tax registration (Texas) and its head office address.
+# With --credits (which needs --stripe): prepaid credit by machine payment, POST /v1/credits.
+# STRIPE_PROFILE_ID is the Stripe profile id (profile_...); it is not a secret.
+CREDITS=0
+STRIPE_PROFILE_ID="${STRIPE_PROFILE_ID:-}"
 DRY_RUN=0
 SKIP_SETUP=0
 
@@ -63,6 +67,9 @@ Options:
                                STRIPE_PRICE_STARTER and STRIPE_PRICE_PRO (environment)
                                (STRIPE_AUTOMATIC_TAX=1 also turns on Stripe Tax in Checkout)
   --secret-version V           Secret Manager version for the Stripe secrets (default latest)
+  --credits                    with --stripe: turn on POST /v1/credits (prepaid credit by machine
+                               payment, cards only). Needs STRIPE_PROFILE_ID=profile_... (environment).
+                               Read deploy/README.md, "Prepaid credit", before using it
   --skip-setup                 skip enabling APIs and creating the repository and database
   --dry-run                    print the gcloud commands, run nothing
   -h, --help                   this text
@@ -143,6 +150,7 @@ while [[ $# -gt 0 ]]; do
     --secret-version) need_value "$@"; SECRET_VERSION="$2"; shift 2 ;;
     --secret-version=*) SECRET_VERSION="${1#*=}"; shift ;;
     --stripe) STRIPE=1; shift ;;
+    --credits) CREDITS=1; shift ;;
     --skip-setup) SKIP_SETUP=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -180,6 +188,11 @@ if [[ $STRIPE -eq 1 ]]; then
   [[ "$STRIPE_PRICE_STARTER" =~ ^price_[A-Za-z0-9]+$ ]] || die "--stripe needs STRIPE_PRICE_STARTER=price_..."
   [[ "$STRIPE_PRICE_PRO" =~ ^price_[A-Za-z0-9]+$ ]] || die "--stripe needs STRIPE_PRICE_PRO=price_..."
   [[ "$SECRET_VERSION" =~ ^(latest|[1-9][0-9]*)$ ]] || die "--secret-version must be latest or a number"
+fi
+
+if [[ $CREDITS -eq 1 ]]; then
+  [[ $STRIPE -eq 1 ]] || die "--credits needs --stripe (the same Stripe secret key takes the payment)"
+  [[ "$STRIPE_PROFILE_ID" =~ ^profile_[A-Za-z0-9_]+$ ]] || die "--credits needs STRIPE_PROFILE_ID=profile_..."
 fi
 
 if [[ -z "$TAG" ]]; then
@@ -279,6 +292,10 @@ if [[ $STRIPE -eq 1 ]]; then
   if [[ -n "${STRIPE_AUTOMATIC_TAX:-}" ]]; then
     [[ "$STRIPE_AUTOMATIC_TAX" =~ ^(1|0|true|false)$ ]] || die "STRIPE_AUTOMATIC_TAX must be 1, 0, true or false"
     env_vars+=",STRIPE_AUTOMATIC_TAX=$STRIPE_AUTOMATIC_TAX"
+  fi
+  if [[ $CREDITS -eq 1 ]]; then
+    # Cards through shared payment tokens only; the stablecoin method is not built.
+    env_vars+=",CALOTYPE_CREDITS=1,CALOTYPE_CREDITS_CARD=1,STRIPE_PROFILE_ID=$STRIPE_PROFILE_ID"
   fi
   deploy+=(--set-secrets
     "STRIPE_SECRET_KEY=$STRIPE_KEY_SECRET:$SECRET_VERSION,STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET_NAME:$SECRET_VERSION")
