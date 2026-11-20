@@ -63,6 +63,10 @@ class Settings:
     # The public origin, e.g. https://calotype.example. Stripe sends buyers back
     # here after checkout and from the portal. Empty: taken from the request.
     public_url: str = ""
+    # Signs the one-click links that remove an email address from a key
+    # (notices.py). Secret. Unset or under 32 characters: no address is stored
+    # and no quota notice is queued. The sender job needs the same value.
+    email_token_secret: str = field(default="", repr=False)
     plans: dict[str, Plan] = field(default_factory=dict)
 
     @classmethod
@@ -94,6 +98,7 @@ class Settings:
             keys_global_per_hour=_env_int("CALOTYPE_KEYS_GLOBAL_PER_HOUR", 200),
             trusted_proxy_hops=_env_int("CALOTYPE_TRUSTED_PROXY_HOPS", 0),
             public_url=os.environ.get("CALOTYPE_PUBLIC_URL", "").strip().rstrip("/"),
+            email_token_secret=os.environ.get("CALOTYPE_EMAIL_TOKEN_SECRET", "").strip(),
             plans=load_plans(plans_file),
         )
 

@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 
 from . import __version__
@@ -32,12 +32,22 @@ from .billing import (
 from .capture import CaptureError, CaptureResult, Renderer, load_blocklist
 from .config import SITE_DIR, Settings
 from .logs import log_event, setup_logging
+from .notices import mask_email, normalize_email, notices_enabled, thresholds_at, token_key_id, token_matches
 from .params import ScreenshotParams
 from .pages import SITE_ORIGIN, add_site_routes
 from .remote_mcp import RemoteMCP
 from .ratelimit import SWEEP_INTERVAL_S, SlidingWindowLimiter, client_ip
 from .ssrf import AddressPolicy, BlockedTarget
-from .storage import REF_LABEL_PREFIX, REF_TAG, ApiKey, Storage, current_month, key_ref, open_configured_storage
+from .storage import (
+    REF_LABEL_PREFIX,
+    REF_TAG,
+    ApiKey,
+    Notice,
+    Storage,
+    current_month,
+    key_ref,
+    open_configured_storage,
+)
 
 log = logging.getLogger("calotype.api")
 
@@ -90,6 +100,31 @@ def _error_response(status: int, code: str, message: str, headers: dict | None =
     return JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **(headers or {})})
 
 
+INVALID_EMAIL = (
+    "The email address is not valid. Send one address, like someone@example.com, of at most 254 characters."
+)
+NOTICES_OFF = "Quota emails are not available on this server."
+
+
+def _removal_page(status: int, title: str, text: str) -> HTMLResponse:
+    """The plain page a removal link opens. The token is in the address, so it is sent nowhere else."""
+    import html
+
+    body = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{html.escape(title)} - Calotype</title></head>"
+        f"<body><h1>{html.escape(title)}</h1><p>{html.escape(text)}</p>"
+        '<p><a href="/">Calotype</a></p></body></html>'
+    )
+    headers = {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    }
+    return HTMLResponse(body, status_code=status, headers=headers)
+
+
 def _next_month_start(now: datetime | None = None) -> str:
     now = now or datetime.now(UTC)
     year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
@@ -106,6 +141,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     settings = settings.with_plans()
+    notices_on = notices_enabled(settings.email_token_secret)
     policy = policy or AddressPolicy()
     # Stripe is optional: without its variables the billing endpoints answer 503.
     billing = billing if billing is not None else billing_from_env()
@@ -135,6 +171,8 @@ def create_app(
         if not billing.configured:
             # Variable names only, never values.
             log_event(log, "billing is off", missing=getattr(billing, "missing", []))
+        if not notices_on:
+            log_event(log, "quota emails are off", needs="CALOTYPE_EMAIL_TOKEN_SECRET (32+ characters)")
         sweeper = asyncio.create_task(sweep_limiters())
         try:
             async with app.state.mcp.run():
@@ -304,7 +342,35 @@ def create_app(
         upgrade = ""
         if used >= NEAR_LIMIT * plan.monthly_quota:
             upgrade = "This key is near its monthly limit. " + upgrade_text(settings.plans, plan, site_origin, billing.configured)
+        if key.email and notices_on:
+            await queue_notices(request, key, plan, month, used)
         return Captured(result=result, params=params, used=used, limit=plan.monthly_quota, upgrade=upgrade)
+
+    async def queue_notices(request: Request, key: ApiKey, plan, month: str, used: int) -> None:
+        """Queue the 80% or 100% notice when this capture is the one that reached it.
+
+        Only queued: the skewbald-checks job sends it, so this service never
+        holds the mail key. Never fails the capture.
+        """
+        for threshold in thresholds_at(used, plan.monthly_quota):
+            notice = Notice(
+                key_id=key.id,
+                month=month,
+                threshold=threshold,
+                used=used,
+                quota=plan.monthly_quota,
+                plan=plan.name,
+                key_ref=request.state.key_ref,
+                resets_at=_next_month_start(),
+                # The same line the MCP tool adds near the limit.
+                upgrade=upgrade_text(settings.plans, plan, site_origin, billing.configured),
+                origin=site_origin,
+            )
+            try:
+                if await asyncio.to_thread(app.state.storage.queue_notice, notice):
+                    log_event(log, "quota notice queued", key_id=key.id, month=month, threshold=threshold)
+            except Exception:
+                log.warning("could not queue a quota notice", exc_info=True)
 
     async def handle_screenshot(request: Request, data: dict[str, Any]) -> Response:
         key = await authenticate(request)
@@ -360,9 +426,20 @@ def create_app(
 
     @app.post("/v1/keys", status_code=201)
     async def create_free_key(request: Request):
-        """Create a free-plan key. Asks for nothing and stores no personal data."""
+        """Create a free-plan key. Asks for nothing; an email address for quota notices is optional."""
         if not settings.self_serve_keys or "free" not in settings.plans:
             raise ApiError(403, "self_serve_disabled", "Self-serve keys are not available right now.")
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        body = body if isinstance(body, dict) else {}
+        # Optional {"email": ...}, checked before the rate limit so a typo costs no slot.
+        email = None
+        if body.get("email") not in (None, ""):
+            email = normalize_email(body.get("email"))
+            if email is None:
+                raise ApiError(400, "invalid_email", INVALID_EMAIL)
         ip = client_ip(
             request.client.host if request.client else None,
             request.headers.get("x-forwarded-for"),
@@ -383,25 +460,82 @@ def create_app(
         # Optional {"ref": "<tag>"} from the site's key button, copied from the
         # page's ?ref= tag. Anything that is not a valid tag is ignored, never an error.
         label = ""
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        ref = body.get("ref") if isinstance(body, dict) else None
+        ref = body.get("ref")
         if isinstance(ref, str) and REF_TAG.match(ref):
             label = REF_LABEL_PREFIX + ref
-        raw, key = await asyncio.to_thread(app.state.storage.create_key, "free", label, internal=False)
+        # With the feature off, an address is not stored at all.
+        stored_email = email if notices_on else None
+        raw, key = await asyncio.to_thread(
+            app.state.storage.create_key, "free", label, internal=False, email=stored_email
+        )
         request.state.key_id = key.id
         plan = settings.plans["free"]
-        return JSONResponse(
-            {
-                "key": raw,
-                "plan": plan.name,
-                "monthly_quota": plan.monthly_quota,
-                "message": "This is the only time the key is shown. Calotype stores only its hash and cannot recover it.",
-            },
-            status_code=201,
-            headers={"Cache-Control": "no-store"},
+        answer: dict[str, Any] = {
+            "key": raw,
+            "plan": plan.name,
+            "monthly_quota": plan.monthly_quota,
+            "message": "This is the only time the key is shown. Calotype stores only its hash and cannot recover it.",
+        }
+        if email is not None:
+            answer.update(email_state(stored_email))
+            if not notices_on:
+                answer["email_message"] = NOTICES_OFF + " The address was not stored."
+        return JSONResponse(answer, status_code=201, headers={"Cache-Control": "no-store"})
+
+    def email_state(email: str | None) -> dict[str, Any]:
+        """What the API says about a key's address: masked, never in full."""
+        return {"email": mask_email(email), "notices": bool(email) and notices_on}
+
+    # --- the optional email address (notices.py) -----------------------------------------
+
+    @app.post("/v1/keys/email")
+    async def set_key_email(request: Request):
+        """Set or replace the key's address for quota notices."""
+        key = await authenticate(request)
+        if not notices_on:
+            raise ApiError(503, "notices_unavailable", NOTICES_OFF)
+        try:
+            data = await request.json()
+        except Exception:
+            raise ApiError(400, "invalid_json", 'The request body must be a JSON object like {"email": "..."}.')
+        email = normalize_email(data.get("email")) if isinstance(data, dict) else None
+        if email is None:
+            raise ApiError(400, "invalid_email", INVALID_EMAIL)
+        await asyncio.to_thread(app.state.storage.set_email, key.id, email)
+        log_event(log, "key email set", key_id=key.id)
+        return JSONResponse(email_state(email), headers={"Cache-Control": "no-store"})
+
+    @app.delete("/v1/keys/email")
+    async def remove_key_email(request: Request):
+        """Remove the key's address. Works with the feature on or off, and when there is none."""
+        key = await authenticate(request)
+        if key.email:
+            await asyncio.to_thread(app.state.storage.set_email, key.id, None)
+            log_event(log, "key email removed", key_id=key.id, how="api")
+        return JSONResponse(email_state(None), headers={"Cache-Control": "no-store"})
+
+    @app.api_route("/v1/keys/email/remove", methods=["GET", "POST"], include_in_schema=False)
+    async def remove_key_email_by_link(request: Request):
+        """The one-click link at the end of each notice. POST is for mail clients' one-click unsubscribe."""
+        token = request.query_params.get("token", "")
+        key_id = token_key_id(token)
+        key = await asyncio.to_thread(app.state.storage.get_key_by_id, key_id) if key_id else None
+        if key is None or not token_matches(settings.email_token_secret, token, key.id, key.email):
+            # One answer for a bad token, another key's token, and an address already removed.
+            return _removal_page(
+                400,
+                "Link not valid",
+                "This link is not valid, or the address was already removed. "
+                "To remove an address another way, reply stop to the notice, or write to skewbald@agentmail.to.",
+            )
+        request.state.key_id = key.id
+        await asyncio.to_thread(app.state.storage.set_email, key.id, None)
+        log_event(log, "key email removed", key_id=key.id, how="link")
+        return _removal_page(
+            200,
+            "Address removed",
+            "The email address was removed from your Calotype key. Calotype will send it no more quota notices. "
+            "The key itself still works.",
         )
 
     @app.get("/v1/usage")
@@ -418,6 +552,7 @@ def create_app(
             "resets_at": _next_month_start(),
             # Not secret: lets the holder name this key to support without sending it.
             "key_ref": request.state.key_ref,
+            **email_state(key.email),
         }
 
     # --- billing (Stripe) -------------------------------------------------------------

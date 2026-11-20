@@ -9,6 +9,7 @@
     python -m calotype.admin set-plan 3 starter
     python -m calotype.admin usage 3
     python -m calotype.admin contacts
+    python -m calotype.admin remove-email 3            (or an address: every key that holds it)
 
 Keys made here are marked internal and never count as demand-test contacts.
 ``mark-internal`` does the same for a test key made through the website's
@@ -23,10 +24,15 @@ command refuses, unless ``--no-stripe`` is given: then the key is revoked and
 the subscription has to be cancelled by hand in the Stripe dashboard.
 
 ``delete-key`` is for a key holder who asks for their record to be deleted
-(see the privacy notice). It deletes the key's record and its usage counts,
-for good, after cancelling a paid key's subscription as ``revoke-key`` does.
+(see the privacy notice). It deletes the key's record (with its email address,
+if it has one), its usage counts and its quota notices, for good, after cancelling a paid key's subscription as ``revoke-key`` does.
 Without ``--yes`` it only prints what it would delete. ``key-id`` reads a key
 from standard input, so it stays out of the shell history, and prints its id.
+Revoking a key also removes its email address.
+
+``remove-email`` is for a holder who replies "stop" to a quota notice: given
+an address, it removes it from every key that holds it; given a key id, from
+that key. It never prints the address.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import sys
 
 from .billing import ALREADY_ENDED, CANCELED, CANCELS_AT_PERIOD_END, BillingProviderError, stripe_for_admin
 from .config import Settings
+from .notices import normalize_email
 from .storage import ApiKey, current_month, open_configured_storage
 
 # Replaced in tests with a provider over a fake Stripe client.
@@ -154,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("contacts", help="non-internal keys with a successful screenshot, by contact ordinal")
 
+    e = sub.add_parser("remove-email", help="remove the quota-notice address from a key id, or from every key with an address")
+    e.add_argument("target", help="a key id, or an email address")
+
     args = parser.parse_args(argv)
     settings = Settings.from_env()
     store = open_configured_storage(settings)
@@ -209,7 +219,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.yes:
             print("Would delete, for good:", file=sys.stderr)
             print(f"  the record of {describe_key(key)}", file=sys.stderr)
-            print("  all of its monthly usage counts", file=sys.stderr)
+            print("  all of its monthly usage counts and quota notices", file=sys.stderr)
+            if key.email:
+                print("  its email address for quota notices", file=sys.stderr)
             if sub_id:
                 when = "at the end of the paid month" if args.at_period_end else "now, with no prorated refund"
                 how = "NOT (--no-stripe)" if args.no_stripe else when
@@ -219,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         if not end_subscription(key, at_period_end=args.at_period_end, no_stripe=args.no_stripe, action="delete"):
             return 1
         store.delete_key(key.id)
-        print(f"deleted key {key.id} and its usage counts", file=sys.stderr)
+        print(f"deleted key {key.id}, its usage counts, its notices and any email address", file=sys.stderr)
         if key.stripe_customer_id or sub_id:
             print(STRIPE_RECORDS_NOTE, file=sys.stderr)
         return 0
@@ -260,6 +272,25 @@ def main(argv: list[str] | None = None) -> int:
         ok = store.set_plan(args.key_id, args.plan)
         print("updated" if ok else "no key with that id", file=sys.stderr)
         return 0 if ok else 1
+
+    if args.cmd == "remove-email":
+        target = args.target.strip()
+        if "@" in target:
+            email = normalize_email(target)
+            ids = store.keys_with_email(email) if email else []
+        elif target.isdigit():
+            key = store.get_key_by_id(int(target))
+            ids = [key.id] if key is not None and key.email else []
+        else:
+            print("give a key id or an email address", file=sys.stderr)
+            return 2
+        for key_id in ids:
+            store.set_email(key_id, None)
+        if not ids:
+            print("no key holds that address" if "@" in target else "that key has no address", file=sys.stderr)
+            return 1
+        print(f"removed the address from key(s) {', '.join(map(str, ids))}", file=sys.stderr)
+        return 0
 
     if args.cmd == "usage":
         month = current_month()

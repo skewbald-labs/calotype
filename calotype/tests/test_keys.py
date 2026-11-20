@@ -54,15 +54,22 @@ def test_create_free_key(client, store):
     assert "testclient" not in dump and "127.0.0.1" not in dump
     assert stored_key_fields(store) == {
         "id", "key_hash", "plan", "label", "created_at", "revoked_at", "internal", "successful_screenshots",
-        "stripe_customer_id", "stripe_subscription_id",
+        "stripe_customer_id", "stripe_subscription_id", "email",
     }
-    assert (key.stripe_customer_id, key.stripe_subscription_id) == (None, None)
+    assert (key.stripe_customer_id, key.stripe_subscription_id, key.email) == (None, None, None)
+    assert "email" not in body and "notices" not in body
 
 
-def test_create_key_needs_no_body_or_auth(client):
+def test_create_key_needs_no_body_or_auth(client, store):
+    # This server has no CALOTYPE_EMAIL_TOKEN_SECRET: quota emails are off, so an
+    # address sent anyway is not stored, and the answer says so.
     r = client.post("/v1/keys", json={"email": "someone@example.com"})
     assert r.status_code == 201
-    assert "email" not in r.json()
+    body = r.json()
+    assert body["email"] is None and body["notices"] is False
+    assert "not stored" in body["email_message"]
+    assert store.get_key(body["key"]).email is None
+    assert "someone" not in stored_text(store)
 
 
 def test_self_serve_can_be_disabled(settings, store):
