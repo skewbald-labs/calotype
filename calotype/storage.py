@@ -11,10 +11,21 @@ key), its plan, its creation time, whether it is Calotype's own
 the website and marked with ``set_internal``), an optional operator label, usage counts, a revocation time,
 and for paid keys the Stripe customer id and subscription id. Separately, the
 ids of Stripe webhook events already handled, so a repeated delivery is not
-applied twice. No email, name, IP address or other personal data.
+applied twice. For prepaid credit (``credits.py``): each key's credit balance,
+and one record per purchase with the Stripe PaymentIntent id, the pack, the
+amount and the times it was made and refunded. No email, name, IP address or
+other personal data.
 
-``delete_key`` removes a key's record and its usage counts for good, on the
-key holder's request (see the privacy notice).
+``delete_key`` removes a key's record, its usage counts, its credit balance and
+its purchase records for good, on the key holder's request (see the privacy
+notice).
+
+Prepaid credit is a second, smaller counter next to the monthly one. A
+screenshot is counted against the month's plan quota first (``try_consume``);
+only when that is used up does the app take one credit (``consume_credit``).
+``add_credit_purchase`` records a purchase and adds its screenshots in one
+atomic step, keyed by the PaymentIntent id, so the same payment arriving twice
+(a retried request, a replayed webhook) adds credit once.
 
 The "contact ordinal" for the demand test is derived, not stored: it is the
 creation order of non-internal keys that have made at least one successful
@@ -61,6 +72,24 @@ class Contact:
     created_at: str
     successful_screenshots: int
     source: str = ""  # the ?ref= tag the key was made with, e.g. "dt-linkedin"; "" if none
+
+
+@dataclass(frozen=True)
+class CreditPurchase:
+    """One prepaid pack bought with one payment."""
+
+    id: str  # the Stripe PaymentIntent id; the same payment is never recorded twice
+    key_id: int
+    pack: str
+    screenshots: int
+    amount_cents: int
+    currency: str
+    challenge_id: str  # the MPP challenge that was paid; "" if recorded from a webhook alone
+    method: str  # the MPP payment method, e.g. "stripe"
+    created_at: str
+    refunded_at: str | None = None
+    credits_removed: int = 0  # unused credit taken back when it was refunded
+    refund_id: str | None = None  # the Stripe Refund id, once Stripe has made the refund
 
 
 # A key made from a link tagged ?ref=<tag> is labelled "ref:<tag>", so the
@@ -120,6 +149,26 @@ class Storage(Protocol):
     def record_success(self, key_id: int) -> int: ...
     def list_contacts(self) -> list[Contact]: ...
     def contact_ordinal(self, key_id: int) -> int | None: ...
+    def get_credit_balance(self, key_id: int) -> int: ...
+    def consume_credit(self, key_id: int) -> tuple[bool, int]: ...
+    def return_credit(self, key_id: int) -> None: ...
+    def add_credit_purchase(
+        self,
+        purchase_id: str,
+        key_id: int,
+        *,
+        pack: str,
+        screenshots: int,
+        amount_cents: int,
+        currency: str,
+        challenge_id: str = "",
+        method: str = "stripe",
+    ) -> tuple[bool, int]: ...
+    def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None: ...
+    def find_credit_purchase_by_challenge(self, challenge_id: str) -> CreditPurchase | None: ...
+    def list_credit_purchases(self, key_id: int) -> list[CreditPurchase]: ...
+    def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None: ...
+    def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool: ...
 
 
 SCHEMA = """
@@ -145,6 +194,24 @@ CREATE TABLE IF NOT EXISTS stripe_events (
     event_id TEXT PRIMARY KEY,
     processed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS credits (
+    key_id INTEGER PRIMARY KEY REFERENCES api_keys(id),
+    balance INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS credit_purchases (
+    id TEXT PRIMARY KEY,
+    key_id INTEGER NOT NULL REFERENCES api_keys(id),
+    pack TEXT NOT NULL,
+    screenshots INTEGER NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    challenge_id TEXT NOT NULL DEFAULT '',
+    method TEXT NOT NULL DEFAULT 'stripe',
+    created_at TEXT NOT NULL,
+    refunded_at TEXT,
+    credits_removed INTEGER NOT NULL DEFAULT 0,
+    refund_id TEXT
+);
 """
 
 # Columns added after the first release. ``init`` adds any that an older
@@ -153,7 +220,11 @@ _ADDED_KEY_COLUMNS = {
     "stripe_customer_id": "TEXT",
     "stripe_subscription_id": "TEXT",
 }
-_INDEXES = "CREATE INDEX IF NOT EXISTS api_keys_subscription ON api_keys (stripe_subscription_id);"
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS api_keys_subscription ON api_keys (stripe_subscription_id);
+CREATE INDEX IF NOT EXISTS credit_purchases_key ON credit_purchases (key_id);
+CREATE INDEX IF NOT EXISTS credit_purchases_challenge ON credit_purchases (challenge_id);
+"""
 
 
 class SQLiteStorage:
@@ -224,7 +295,7 @@ class SQLiteStorage:
         return cur.rowcount == 1
 
     def delete_key(self, key_id: int) -> bool:
-        """Delete the key's record and all its usage counts. False if there was no such key.
+        """Delete the key's record, usage counts, credit and purchase records. False if there was no such key.
 
         Ids are never handed out again (``AUTOINCREMENT``), so a late Stripe
         event for a deleted key finds no key rather than another one.
@@ -234,6 +305,8 @@ class SQLiteStorage:
             db.execute("BEGIN IMMEDIATE")
             try:
                 db.execute("DELETE FROM usage WHERE key_id = ?", (key_id,))
+                db.execute("DELETE FROM credits WHERE key_id = ?", (key_id,))
+                db.execute("DELETE FROM credit_purchases WHERE key_id = ?", (key_id,))
                 cur = db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
                 db.execute("COMMIT")
             except BaseException:
@@ -375,6 +448,150 @@ class SQLiteStorage:
                 return c.ordinal
         return None
 
+    # --- prepaid credit ------------------------------------------------------------------
+
+    def get_credit_balance(self, key_id: int) -> int:
+        with self._lock:
+            return self._credit_locked(key_id)
+
+    def consume_credit(self, key_id: int) -> tuple[bool, int]:
+        """Atomically take one credit if the key has any. Returns (taken, balance after the call)."""
+        with self._lock:
+            row = self._db().execute(
+                "UPDATE credits SET balance = balance - 1 WHERE key_id = ? AND balance > 0 RETURNING balance",
+                (key_id,),
+            ).fetchone()
+            if row is None:
+                return False, self._credit_locked(key_id)
+            return True, int(row[0])
+
+    def return_credit(self, key_id: int) -> None:
+        """Give back the credit taken for a screenshot that then failed."""
+        with self._lock:
+            self._db().execute("UPDATE credits SET balance = balance + 1 WHERE key_id = ?", (key_id,))
+
+    def add_credit_purchase(
+        self,
+        purchase_id: str,
+        key_id: int,
+        *,
+        pack: str,
+        screenshots: int,
+        amount_cents: int,
+        currency: str,
+        challenge_id: str = "",
+        method: str = "stripe",
+    ) -> tuple[bool, int]:
+        """Record a paid pack and add its screenshots, once per ``purchase_id``.
+
+        Returns (added, balance after the call). ``added`` is False, and
+        nothing changes, if this purchase was recorded before or the key does
+        not exist.
+        """
+        if screenshots <= 0:
+            raise ValueError("a purchase adds at least one screenshot")
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            db = self._db()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                added = False
+                if db.execute("SELECT 1 FROM api_keys WHERE id = ?", (key_id,)).fetchone() is not None:
+                    cur = db.execute(
+                        "INSERT INTO credit_purchases (id, key_id, pack, screenshots, amount_cents, currency, "
+                        "challenge_id, method, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT (id) DO NOTHING",
+                        (purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, now),
+                    )
+                    added = cur.rowcount == 1
+                    if added:
+                        db.execute(
+                            "INSERT INTO credits (key_id, balance) VALUES (?, ?) "
+                            "ON CONFLICT (key_id) DO UPDATE SET balance = balance + excluded.balance",
+                            (key_id, screenshots),
+                        )
+                balance = self._credit_locked(key_id)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return added, balance
+
+    def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None:
+        with self._lock:
+            row = self._db().execute(
+                f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)
+            ).fetchone()
+        return _row_to_purchase(row) if row else None
+
+    def find_credit_purchase_by_challenge(self, challenge_id: str) -> CreditPurchase | None:
+        if not challenge_id:
+            return None
+        with self._lock:
+            row = self._db().execute(
+                f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE challenge_id = ? LIMIT 1", (challenge_id,)
+            ).fetchone()
+        return _row_to_purchase(row) if row else None
+
+    def list_credit_purchases(self, key_id: int) -> list[CreditPurchase]:
+        """A key's purchases, oldest first."""
+        with self._lock:
+            rows = self._db().execute(
+                f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE key_id = ? ORDER BY created_at, id",
+                (key_id,),
+            ).fetchall()
+        return [_row_to_purchase(r) for r in rows]
+
+    def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None:
+        """Mark a purchase refunded and take back what is left of it, as one step.
+
+        The credit taken back is the purchase's size or the key's whole
+        balance, whichever is smaller: credit already spent stays spent.
+        Returns (the purchase as it is now, whether this call changed it), or
+        None if there is no such purchase. A second call changes nothing.
+        """
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            db = self._db()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)
+                ).fetchone()
+                changed = False
+                if row is not None and row[9] is None:
+                    purchase = _row_to_purchase(row)
+                    removed = min(purchase.screenshots, self._credit_locked(purchase.key_id))
+                    db.execute(
+                        "UPDATE credits SET balance = balance - ? WHERE key_id = ?", (removed, purchase.key_id)
+                    )
+                    db.execute(
+                        "UPDATE credit_purchases SET refunded_at = ?, credits_removed = ? WHERE id = ?",
+                        (now, removed, purchase_id),
+                    )
+                    row = db.execute(
+                        f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)
+                    ).fetchone()
+                    changed = True
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return (_row_to_purchase(row), changed) if row else None
+
+    def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool:
+        """Record the Stripe Refund made for a refunded purchase."""
+        with self._lock:
+            cur = self._db().execute(
+                "UPDATE credit_purchases SET refund_id = ? WHERE id = ? AND refunded_at IS NOT NULL",
+                (refund_id, purchase_id),
+            )
+        return cur.rowcount == 1
+
+    def _credit_locked(self, key_id: int) -> int:
+        row = self._db().execute("SELECT balance FROM credits WHERE key_id = ?", (key_id,)).fetchone()
+        return int(row[0]) if row else 0
+
     def _usage_locked(self, key_id: int, month: str) -> int:
         row = self._db().execute("SELECT count FROM usage WHERE key_id = ? AND month = ?", (key_id, month)).fetchone()
         return int(row[0]) if row else 0
@@ -397,6 +614,29 @@ def _row_to_key(row) -> ApiKey:
         successful_screenshots=int(row[6]),
         stripe_customer_id=row[7],
         stripe_subscription_id=row[8],
+    )
+
+
+_PURCHASE_COLUMNS = (
+    "id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, created_at, "
+    "refunded_at, credits_removed, refund_id"
+)
+
+
+def _row_to_purchase(row) -> CreditPurchase:
+    return CreditPurchase(
+        id=row[0],
+        key_id=int(row[1]),
+        pack=row[2],
+        screenshots=int(row[3]),
+        amount_cents=int(row[4]),
+        currency=row[5],
+        challenge_id=row[6] or "",
+        method=row[7],
+        created_at=row[8],
+        refunded_at=row[9],
+        credits_removed=int(row[10] or 0),
+        refund_id=row[11],
     )
 
 

@@ -67,6 +67,12 @@ def no_stripe_env(monkeypatch):
     """Billing is off unless a test turns it on: no Stripe variable leaks in from the shell."""
     for name in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STARTER", "STRIPE_PRICE_PRO"):
         monkeypatch.delenv(name, raising=False)
+    # The same for prepaid credit (credits.py).
+    for name in (
+        "CALOTYPE_CREDITS", "CALOTYPE_CREDITS_CARD", "CALOTYPE_CREDITS_STABLECOIN", "STRIPE_PROFILE_ID",
+        "MPP_SECRET_KEY", "MPP_REALM", "STRIPE_MPP_API_VERSION", "STRIPE_SPT_PAYMENT_METHOD_TYPES",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
@@ -29,8 +30,13 @@ from .billing import (
     InvalidWebhook,
     billing_from_env,
 )
+from . import mpp
 from .capture import CaptureError, CaptureResult, Renderer, load_blocklist
-from .config import SITE_DIR, Settings
+from .config import SITE_DIR, CreditPack, Settings
+from .credits import HANDLED_EVENTS as CREDIT_EVENTS
+from .credits import MIN_CARD_CENTS
+from .credits import UNAVAILABLE_MESSAGE as CREDITS_UNAVAILABLE_MESSAGE
+from .credits import CreditsProvider, PaymentRefused, PaymentUnconfirmed, credits_from_env
 from .logs import log_event, setup_logging
 from .params import ScreenshotParams
 from .pages import SITE_ORIGIN, add_site_routes
@@ -64,6 +70,9 @@ class Captured:
     limit: int
     # One line for the model once a key nears its limit (running plan A11); "" otherwise.
     upgrade: str = ""
+    # Set when this capture was paid from prepaid credit (the month's quota was used up):
+    # the credit left after it. None when it counted against the monthly quota.
+    credits: int | None = None
 
 
 NEAR_LIMIT = 0.8  # the share of a month's quota at which the tool starts naming the next plan
@@ -103,12 +112,19 @@ def create_app(
     storage: Storage | None = None,
     renderer: Any = None,
     billing: BillingProvider | None = None,
+    credits: CreditsProvider | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     settings = settings.with_plans()
     policy = policy or AddressPolicy()
     # Stripe is optional: without its variables the billing endpoints answer 503.
     billing = billing if billing is not None else billing_from_env()
+    # Prepaid credit by machine payment is off unless CALOTYPE_CREDITS and its settings are set.
+    credits = credits if credits is not None else credits_from_env()
+    # A pack under Stripe's card minimum could never be paid for, so it is not offered.
+    credit_packs: dict[str, CreditPack] = {
+        name: pack for name, pack in (settings.credit_packs or {}).items() if pack.price_usd_cents >= MIN_CARD_CENTS
+    }
     if renderer is None:
         renderer = Renderer(
             policy,
@@ -131,10 +147,22 @@ def create_app(
             version=__version__,
             max_concurrency=settings.max_concurrency,
             billing=billing.configured,
+            credits=credits.configured,
         )
         if not billing.configured:
             # Variable names only, never values.
             log_event(log, "billing is off", missing=getattr(billing, "missing", []))
+        credits_missing = getattr(credits, "missing", [])
+        if not credits.configured and "CALOTYPE_CREDITS" not in credits_missing:
+            # Switched on but incomplete. Left unsaid when it was never switched on.
+            log_event(log, "prepaid credit is off", level=logging.WARNING, missing=credits_missing)
+        if getattr(credits, "unsupported", ()):
+            log_event(
+                log,
+                "asked for a payment method that is not built; it is not offered",
+                level=logging.WARNING,
+                settings=list(credits.unsupported),
+            )
         sweeper = asyncio.create_task(sweep_limiters())
         try:
             async with app.state.mcp.run():
@@ -165,6 +193,7 @@ def create_app(
     app.state.renderer = renderer
     app.state.policy = policy
     app.state.billing = billing
+    app.state.credits = credits
     # In-memory only; see ratelimit.py. IPs are never stored or logged.
     app.state.key_limiter = SlidingWindowLimiter(settings.keys_per_ip_per_hour)
     app.state.key_global_limiter = SlidingWindowLimiter(settings.keys_global_per_hour)
@@ -199,9 +228,13 @@ def create_app(
                 target=request.state.target,
             )
 
-    async def authenticate(request: Request, *, allow_query: bool = True) -> ApiKey:
+    async def authenticate(request: Request, *, allow_query: bool = True, payment_ok: bool = False) -> ApiKey:
         raw = None
         auth = request.headers.get("authorization", "")
+        if payment_ok and mpp.payment_credential(auth) is not None:
+            # /v1/credits only: Authorization carries a payment credential, so the key is in the query.
+            auth = ""
+        request.state.key_in_header = bool(auth)
         if auth:
             scheme, _, token = auth.partition(" ")
             if scheme.lower() != "bearer" or not token.strip():
@@ -239,6 +272,12 @@ def create_app(
 
     site_origin = (settings.public_url or SITE_ORIGIN).rstrip("/")
 
+    def credits_text() -> str:
+        """For a key out of quota: that prepaid screenshots can be bought, where that is on."""
+        if not credits.configured or not credit_packs:
+            return ""
+        return f" Or buy prepaid screenshots with no subscription: POST /v1/credits ({site_origin}/docs#credits)."
+
     async def capture_for_key(request: Request, key: ApiKey, data: dict[str, Any]) -> Captured:
         """The one capture path, for /v1/screenshot and the MCP tool alike.
 
@@ -258,26 +297,40 @@ def create_app(
 
         store: Storage = app.state.storage
         month = current_month()
+        # The month's plan quota is used first; prepaid credit only once that is gone.
         allowed, used = await asyncio.to_thread(store.try_consume, key.id, month, plan.monthly_quota)
+        credits_left: int | None = None
+        if not allowed:
+            allowed, credits_left = await asyncio.to_thread(store.consume_credit, key.id)
         if not allowed:
             raise ApiError(
                 429,
                 "quota_exceeded",
                 f"This key has used its {plan.monthly_quota} screenshots for {month} on the "
                 f"'{plan.name}' plan. The count resets at {_next_month_start()}. "
-                + upgrade_text(settings.plans, plan, site_origin, billing.configured),
+                + upgrade_text(settings.plans, plan, site_origin, billing.configured)
+                + credits_text(),
                 plan=plan.name,
                 limit=plan.monthly_quota,
                 used=used,
+                credits=0,
                 resets_at=_next_month_start(),
             )
+
+        async def uncount():
+            # A failed capture costs nothing: put back whichever counter paid for it.
+            if credits_left is None:
+                await asyncio.to_thread(store.refund, key.id, month)
+            else:
+                await asyncio.to_thread(store.return_credit, key.id)
+
         try:
             result = await renderer.capture(params)
         except CaptureError as e:
-            await asyncio.to_thread(store.refund, key.id, month)
+            await uncount()
             raise ApiError(e.status, e.code, e.message, e.headers)
         except Exception:
-            await asyncio.to_thread(store.refund, key.id, month)
+            await uncount()
             log.exception("capture failed", extra={"fields": {"request_id": request.state.request_id}})
             raise ApiError(500, "internal_error", "The screenshot failed. It was not counted against your quota.")
 
@@ -304,7 +357,11 @@ def create_app(
         upgrade = ""
         if used >= NEAR_LIMIT * plan.monthly_quota:
             upgrade = "This key is near its monthly limit. " + upgrade_text(settings.plans, plan, site_origin, billing.configured)
-        return Captured(result=result, params=params, used=used, limit=plan.monthly_quota, upgrade=upgrade)
+        if credits_left is not None:
+            upgrade = f"This month's plan quota is used up; this came from prepaid credit, {credits_left:,} left."
+        return Captured(
+            result=result, params=params, used=used, limit=plan.monthly_quota, upgrade=upgrade, credits=credits_left
+        )
 
     async def handle_screenshot(request: Request, data: dict[str, Any]) -> Response:
         key = await authenticate(request)
@@ -319,6 +376,8 @@ def create_app(
             headers["X-Calotype-Target-Status"] = str(result.target_status)
         if result.truncated:
             headers["X-Calotype-Truncated"] = "1"
+        if shot.credits is not None:
+            headers["X-Calotype-Credits"] = str(shot.credits)
         return Response(content=result.image, media_type=result.content_type, headers=headers)
 
     # The remote MCP server: the same keys, quota and capture path, over MCP.
@@ -410,11 +469,14 @@ def create_app(
         plan = settings.plans.get(key.plan)
         month = current_month()
         used = await asyncio.to_thread(app.state.storage.get_usage, key.id, month)
+        credit = await asyncio.to_thread(app.state.storage.get_credit_balance, key.id)
         return {
             "plan": key.plan,
             "month": month,
             "used": used,
             "limit": plan.monthly_quota if plan else 0,
+            # Prepaid screenshots, used only after the month's limit. They do not reset.
+            "credits": credit,
             "resets_at": _next_month_start(),
             # Not secret: lets the holder name this key to support without sending it.
             "key_ref": request.state.key_ref,
@@ -510,8 +572,10 @@ def create_app(
             event = provider.verify_webhook(payload, request.headers.get("stripe-signature"))
         except InvalidWebhook as e:
             raise ApiError(400, "invalid_webhook", str(e))
+        # A payment for prepaid credit goes to the credits module; everything else is a subscription event.
+        handler = credits if credits.configured and event.get("type") in CREDIT_EVENTS else provider
         try:
-            result = await asyncio.to_thread(provider.handle_event, event, app.state.storage)
+            result = await asyncio.to_thread(handler.handle_event, event, app.state.storage)
         except BillingProviderError:
             # 5xx makes Stripe deliver the event again later.
             raise ApiError(500, "webhook_failed", "The event could not be applied now; it will be retried.")
@@ -520,9 +584,110 @@ def create_app(
             raise ApiError(500, "webhook_failed", "The event could not be applied now; it will be retried.")
         return billing_response({"received": True, "outcome": result.outcome})
 
+    # --- prepaid credit, bought by machine payment (MPP) ------------------------------------
+
+    def pack_json(pack: CreditPack) -> dict[str, Any]:
+        return {
+            "name": pack.name,
+            "title": pack.title,
+            "screenshots": pack.screenshots,
+            "price_usd": pack.price_usd_cents / 100,
+        }
+
+    def payment_challenge(
+        request: Request, key: ApiKey, pack: CreditPack, realm: str, header: str, problem: str, detail: str
+    ) -> JSONResponse:
+        """402 with a new challenge: the first answer, and the answer to a credential that was refused."""
+        challenge = credits.challenge(key, pack, realm=realm, header=header)
+        code = problem.replace("-", "_")
+        if problem == "payment-required":
+            message = (
+                f"Pay ${pack.price_usd_cents / 100:g} for {pack.screenshots:,} prepaid screenshots: answer the "
+                f"Payment challenge in WWW-Authenticate (MPP, method 'stripe'), then send this request again "
+                f"with the credential in {header or 'Authorization'}."
+            )
+        else:
+            message = detail + " A new challenge is in WWW-Authenticate."
+        body = mpp.problem(
+            problem,
+            detail,
+            challengeId=challenge.id,
+            # Calotype's own error shape, beside the protocol's problem details.
+            error={"code": code, "message": message, "pack": pack_json(pack)},
+        )
+        log_event(log, "credit challenge", key_id=key.id, pack=pack.name, problem=problem)
+        return JSONResponse(
+            body,
+            status_code=402,
+            media_type=mpp.PROBLEM_CONTENT_TYPE,
+            headers={"WWW-Authenticate": challenge.www_authenticate(), "Cache-Control": "no-store"},
+        )
+
+    # In the API schema only where it is on sale; where it is off it answers 503, like billing.
+    @app.post("/v1/credits", include_in_schema=credits.configured)
+    async def buy_credits(request: Request):
+        """Buy a prepaid pack by machine payment: 402 with a challenge, then the same request with a credential."""
+        if not credits.configured:
+            raise ApiError(503, "billing_unavailable", CREDITS_UNAVAILABLE_MESSAGE)
+        # The key first: a request without one learns nothing about prices (401 before 402).
+        key = await authenticate(request, payment_ok=True)
+        try:
+            data = await request.json()
+        except Exception:
+            raise ApiError(400, "invalid_json", 'The request body must be a JSON object like {"pack": "starter"}.')
+        name = data.get("pack") if isinstance(data, dict) else None
+        pack = credit_packs.get(name) if isinstance(name, str) else None
+        if pack is None:
+            raise ApiError(
+                400,
+                "invalid_pack",
+                f"Choose a pack to buy: {', '.join(credit_packs) or 'none are on sale'}.",
+                packs=[pack_json(p) for p in credit_packs.values()],
+            )
+        # The realm is the public host name, without a port, as the MPP SDKs set it.
+        realm = getattr(getattr(credits, "config", None), "realm", "") or (
+            urlsplit(public_base(request)).hostname or "calotype"
+        )
+        # Where the payment credential goes. Authorization already holds the API key, unless the key came in
+        # the query string; then the credential uses Authorization, the protocol's default.
+        header = mpp.PAYMENT_AUTHORIZATION if request.state.key_in_header else ""
+        credential = request.headers.get(header.lower() if header else "authorization", "")
+        if mpp.payment_credential(credential) is None:
+            return payment_challenge(
+                request, key, pack, realm, header, "payment-required", "Payment is required for this pack."
+            )
+        try:
+            paid = await asyncio.to_thread(
+                credits.settle, key, pack, credential, app.state.storage, realm=realm, header=header
+            )
+        except PaymentRefused as e:
+            return payment_challenge(request, key, pack, realm, header, e.problem, e.detail)
+        except PaymentUnconfirmed:
+            raise ApiError(
+                502,
+                "payment_unconfirmed",
+                "Stripe has not confirmed this payment yet. Send the same request with the same credential "
+                "again: it cannot charge twice. GET /v1/usage shows the credit once it is added.",
+            )
+        except BillingUnavailable:
+            raise ApiError(503, "billing_unavailable", CREDITS_UNAVAILABLE_MESSAGE)
+        except BillingProviderError:
+            raise ApiError(502, "billing_error", "The payment provider could not take the payment. Try again shortly.")
+        return JSONResponse(
+            {
+                "pack": pack.name,
+                "screenshots_added": paid.screenshots if paid.added else 0,
+                "credits": paid.balance,
+                # True when this payment had been credited before: nothing was charged or added again.
+                "already_credited": not paid.added,
+                "payment": {"method": "stripe", "reference": paid.reference, "amount_usd": pack.price_usd_cents / 100},
+            },
+            headers={"Payment-Receipt": mpp.receipt("stripe", paid.reference), "Cache-Control": "no-store"},
+        )
+
     @app.get("/v1/plans")
     async def plans():
-        return {
+        body: dict[str, Any] = {
             # Settled once paid plans are on sale on this server.
             "provisional": not billing.configured,
             "plans": [
@@ -530,6 +695,10 @@ def create_app(
                 for p in settings.plans.values()
             ],
         }
+        if credits.configured:
+            # Prepaid packs, only where they can be bought (POST /v1/credits).
+            body["credit_packs"] = [pack_json(p) for p in credit_packs.values()]
+        return body
 
     if settings.serve_site and SITE_DIR.is_dir():
         add_site_routes(app, SITE_DIR, paid_open=billing.configured)

@@ -4,5 +4,9 @@
     "free": {"title": "Free", "monthly_quota": 100, "price_usd_cents": 0},
     "starter": {"title": "Starter", "monthly_quota": 5000, "price_usd_cents": 1900},
     "pro": {"title": "Pro", "monthly_quota": 25000, "price_usd_cents": 4900}
+  },
+  "_credit_packs_comment": "Prepaid screenshots bought in one machine payment (POST /v1/credits, off unless CALOTYPE_CREDITS=1). Used after the month's plan quota; they do not expire.",
+  "credit_packs": {
+    "starter": {"title": "Starter pack", "screenshots": 5000, "price_usd_cents": 1900}
   }
 }

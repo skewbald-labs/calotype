@@ -23,6 +23,13 @@ Layout, under a configurable collection prefix (default ``calotype_``):
 ``{prefix}stripe_events/{event id}``
     ``processed_at``: one document per Stripe webhook event already handled.
     ``create`` fails if the document exists, which makes recording atomic.
+``{prefix}credits/{id}``
+    ``key_id``, ``balance``: the key's prepaid screenshots not yet used.
+``{prefix}credit_purchases/{PaymentIntent id}``
+    One document per prepaid pack bought: ``id``, ``key_id``, ``pack``,
+    ``screenshots``, ``amount_cents``, ``currency``, ``challenge_id``,
+    ``method``, ``created_at``, ``refunded_at``, ``credits_removed``,
+    ``refund_id``.
 
 No email, name, IP address or URL is stored.
 
@@ -53,6 +60,15 @@ already revoked", runs in a transaction; it is a rare operator action.
 Deleting a key (``delete_key``, on the key holder's request) removes its key
 document and every usage document for it; the id is not reused.
 
+Prepaid credit: taking one credit (``consume_credit``) works like
+``try_consume`` turned round: read the balance and refuse without a write if it
+is zero, otherwise apply ``balance - 1`` and undo it if the result went below
+zero. Recording a purchase is one atomic batch: ``create`` the purchase
+document (which fails if it exists) and ``Increment`` the balance, together or
+not at all, so a purchase is added once however often and however much in
+parallel the call is repeated. Refunding one runs in a transaction that reads
+the purchase first, so it too happens once; it is a rare operator action.
+
 Queries use only single-field filters and sorts, which Firestore indexes
 automatically, so no composite index has to be deployed.
 """
@@ -67,7 +83,17 @@ from google.api_core.exceptions import Aborted, AlreadyExists, NotFound
 from google.cloud import firestore
 from google.cloud.firestore import FieldFilter
 
-from .storage import KEY_REF, REF_LABEL_PREFIX, REF_TAG, ApiKey, Contact, generate_key, hash_key, source_from_label
+from .storage import (
+    KEY_REF,
+    REF_LABEL_PREFIX,
+    REF_TAG,
+    ApiKey,
+    Contact,
+    CreditPurchase,
+    generate_key,
+    hash_key,
+    source_from_label,
+)
 
 DEFAULT_COLLECTION_PREFIX = "calotype_"
 
@@ -90,6 +116,8 @@ class FirestoreStorage:
         self._usage = self._client.collection(f"{collection_prefix}usage")
         self._counter = self._client.collection(f"{collection_prefix}meta").document("key_ids")
         self._events = self._client.collection(f"{collection_prefix}stripe_events")
+        self._credits = self._client.collection(f"{collection_prefix}credits")
+        self._purchases = self._client.collection(f"{collection_prefix}credit_purchases")
 
     # --- plumbing -----------------------------------------------------------------
 
@@ -101,7 +129,7 @@ class FirestoreStorage:
 
     def collections(self) -> list[Any]:
         """The collections this store writes to (used by tests and cleanup)."""
-        return [self._keys, self._usage, self._counter.parent, self._events]
+        return [self._keys, self._usage, self._counter.parent, self._events, self._credits, self._purchases]
 
     @staticmethod
     def _increment(ref, field: str, by: int, *, create: dict | None = None) -> int:
@@ -168,18 +196,20 @@ class FirestoreStorage:
         return revoke(self._client.transaction())
 
     def delete_key(self, key_id: int) -> bool:
-        """Delete the key's document and all its usage documents. False if there was no such key.
+        """Delete the key's document, usage documents, credit and purchase records. False if there was no such key.
 
-        Usage documents go first, so a run cut short leaves the key document
+        The other documents go first, so a run cut short leaves the key document
         to find and delete again. The counter in ``meta/key_ids`` is not
         lowered, so the id is never handed out again.
         """
         ref = self._key_ref(key_id)
         exists = ref.get().exists
         usage = self._usage.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()
+        purchases = self._purchases.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()
         batch = self._client.batch()
-        pending = 0
-        for doc in usage:
+        batch.delete(self._credit_ref(key_id))
+        pending = 1
+        for doc in [*usage, *purchases]:
             batch.delete(doc.reference)
             pending += 1
             if pending == 400:  # a batch takes at most 500 writes
@@ -315,6 +345,154 @@ class FirestoreStorage:
         except NotFound:
             return 0
 
+    # --- prepaid credit -------------------------------------------------------------------
+
+    def _credit_ref(self, key_id: int):
+        return self._credits.document(str(int(key_id)))
+
+    def _purchase_ref(self, purchase_id: str):
+        return self._purchases.document(_purchase_doc_id(purchase_id))
+
+    def get_credit_balance(self, key_id: int) -> int:
+        snap = self._credit_ref(key_id).get()
+        return max(int(snap.get("balance")), 0) if snap.exists else 0
+
+    def consume_credit(self, key_id: int) -> tuple[bool, int]:
+        """Atomically take one credit if the key has any. Returns (taken, balance after the call)."""
+        if self.get_credit_balance(key_id) <= 0:  # one read and no write for a key without credit
+            return False, 0
+        ref = self._credit_ref(key_id)
+        balance = self._increment(ref, "balance", -1)
+        if balance >= 0:
+            return True, balance
+        # Another request took the last one first: undo, as try_consume does.
+        return False, max(self._increment(ref, "balance", 1), 0)
+
+    def return_credit(self, key_id: int) -> None:
+        """Give back the credit taken for a screenshot that then failed."""
+        try:
+            self._increment(self._credit_ref(key_id), "balance", 1)
+        except NotFound:
+            return
+
+    def add_credit_purchase(
+        self,
+        purchase_id: str,
+        key_id: int,
+        *,
+        pack: str,
+        screenshots: int,
+        amount_cents: int,
+        currency: str,
+        challenge_id: str = "",
+        method: str = "stripe",
+    ) -> tuple[bool, int]:
+        """Record a paid pack and add its screenshots, once per ``purchase_id``.
+
+        Returns (added, balance after the call). ``added`` is False, and
+        nothing changes, if this purchase was recorded before or the key does
+        not exist.
+        """
+        if screenshots <= 0:
+            raise ValueError("a purchase adds at least one screenshot")
+        purchase_ref, credit_ref = self._purchase_ref(purchase_id), self._credit_ref(key_id)
+        if not self._key_ref(key_id).get().exists:
+            return False, 0
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        record = {
+            "id": purchase_id,
+            "key_id": int(key_id),
+            "pack": pack,
+            "screenshots": int(screenshots),
+            "amount_cents": int(amount_cents),
+            "currency": currency,
+            "challenge_id": challenge_id,
+            "method": method,
+            "created_at": now,
+            "refunded_at": None,
+            "credits_removed": 0,
+            "refund_id": None,
+        }
+        # One atomic batch: the purchase document is created only if it does not
+        # exist, and the balance grows by an Increment in the same commit. Either
+        # both happen or neither. No read is involved, so parallel calls for one
+        # payment do not contend: one commit wins and the others fail whole.
+        for attempt in range(6):
+            batch = self._client.batch()
+            batch.create(purchase_ref, record)
+            batch.set(credit_ref, {"key_id": int(key_id), "balance": firestore.Increment(int(screenshots))}, merge=True)
+            try:
+                results = batch.commit()
+            except AlreadyExists:
+                return False, self.get_credit_balance(key_id)
+            except Aborted:
+                # Contention, not a verdict: nothing was written by this commit. If a
+                # parallel call's commit won, the purchase now exists; otherwise try again.
+                if purchase_ref.get().exists:
+                    return False, self.get_credit_balance(key_id)
+                time.sleep(0.05 * (2**attempt))
+                continue
+            return True, int(results[1].transform_results[0].integer_value)
+        raise Aborted(f"could not record purchase {purchase_id} after retries")
+
+    def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None:
+        snap = self._purchase_ref(purchase_id).get()
+        return _doc_to_purchase(snap.to_dict()) if snap.exists else None
+
+    def find_credit_purchase_by_challenge(self, challenge_id: str) -> CreditPurchase | None:
+        if not challenge_id:
+            return None
+        query = self._purchases.where(filter=FieldFilter("challenge_id", "==", challenge_id)).limit(1)
+        docs = [d.to_dict() for d in query.stream()]
+        return _doc_to_purchase(docs[0]) if docs else None
+
+    def list_credit_purchases(self, key_id: int) -> list[CreditPurchase]:
+        """A key's purchases, oldest first (sorted here, so no composite index is needed)."""
+        query = self._purchases.where(filter=FieldFilter("key_id", "==", int(key_id)))
+        purchases = [_doc_to_purchase(d.to_dict()) for d in query.stream()]
+        return sorted(purchases, key=lambda p: (p.created_at, p.id))
+
+    def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None:
+        """Mark a purchase refunded and take back what is left of it, as one step (see storage.py)."""
+        purchase_ref = self._purchase_ref(purchase_id)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+
+        @firestore.transactional
+        def refund(t) -> tuple[CreditPurchase, bool] | None:
+            snap = purchase_ref.get(transaction=t)
+            if not snap.exists:
+                return None
+            doc = snap.to_dict()
+            if doc.get("refunded_at") is not None:
+                return _doc_to_purchase(doc), False
+            credit_ref = self._credit_ref(doc["key_id"])
+            credit = credit_ref.get(transaction=t)
+            # The stored value, which a refused consume_credit may hold below zero
+            # for an instant: subtract from it as it is, so that undo still lands right.
+            stored = int(credit.get("balance")) if credit.exists else 0
+            removed = min(int(doc["screenshots"]), max(stored, 0))
+            if credit.exists:
+                t.update(credit_ref, {"balance": stored - removed})
+            changes = {"refunded_at": now, "credits_removed": removed}
+            t.update(purchase_ref, changes)
+            return _doc_to_purchase({**doc, **changes}), True
+
+        return refund(self._client.transaction())
+
+    def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool:
+        """Record the Stripe Refund made for a refunded purchase."""
+        ref = self._purchase_ref(purchase_id)
+
+        @firestore.transactional
+        def record(t) -> bool:
+            snap = ref.get(transaction=t)
+            if not snap.exists or snap.get("refunded_at") is None:
+                return False
+            t.update(ref, {"refund_id": refund_id})
+            return True
+
+        return record(self._client.transaction())
+
     # --- contacts -----------------------------------------------------------------------
 
     def list_contacts(self) -> list[Contact]:
@@ -354,6 +532,31 @@ def _event_doc_id(event_id: str) -> str:
     if not event_id or "/" in event_id or event_id in (".", "..") or event_id.startswith("__"):
         raise ValueError("not a usable event id")
     return event_id
+
+
+def _purchase_doc_id(purchase_id: str) -> str:
+    # Stripe ids are letters, digits and underscores. Anything else could name
+    # another path, so it is refused rather than escaped.
+    if not purchase_id or "/" in purchase_id or purchase_id in (".", "..") or purchase_id.startswith("__"):
+        raise ValueError("not a usable purchase id")
+    return purchase_id
+
+
+def _doc_to_purchase(d: dict) -> CreditPurchase:
+    return CreditPurchase(
+        id=d["id"],
+        key_id=int(d["key_id"]),
+        pack=d["pack"],
+        screenshots=int(d["screenshots"]),
+        amount_cents=int(d["amount_cents"]),
+        currency=d["currency"],
+        challenge_id=d.get("challenge_id") or "",
+        method=d.get("method") or "stripe",
+        created_at=d["created_at"],
+        refunded_at=d.get("refunded_at"),
+        credits_removed=int(d.get("credits_removed") or 0),
+        refund_id=d.get("refund_id"),
+    )
 
 
 def _doc_to_key(d: dict) -> ApiKey:

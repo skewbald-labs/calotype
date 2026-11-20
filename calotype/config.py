@@ -35,6 +35,16 @@ class Plan:
 
 
 @dataclass(frozen=True)
+class CreditPack:
+    """Prepaid screenshots sold in one payment (``POST /v1/credits``). They do not expire."""
+
+    name: str
+    screenshots: int
+    price_usd_cents: int
+    title: str = ""
+
+
+@dataclass(frozen=True)
 class Settings:
     # "sqlite" (database_url) or "firestore" (Google Cloud Firestore, Native mode).
     storage_backend: str = "sqlite"
@@ -64,6 +74,8 @@ class Settings:
     # here after checkout and from the portal. Empty: taken from the request.
     public_url: str = ""
     plans: dict[str, Plan] = field(default_factory=dict)
+    # Prepaid packs, from the plans file's "credit_packs". None: not loaded yet (see with_plans).
+    credit_packs: dict[str, CreditPack] | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -95,15 +107,20 @@ class Settings:
             trusted_proxy_hops=_env_int("CALOTYPE_TRUSTED_PROXY_HOPS", 0),
             public_url=os.environ.get("CALOTYPE_PUBLIC_URL", "").strip().rstrip("/"),
             plans=load_plans(plans_file),
+            credit_packs=load_credit_packs(plans_file),
         )
 
     def with_plans(self) -> "Settings":
-        """Return a copy with plans loaded from plans_file if none are set."""
-        if self.plans:
+        """Return a copy with plans and credit packs loaded from plans_file where none are set."""
+        if self.plans and self.credit_packs is not None:
             return self
         from dataclasses import replace
 
-        return replace(self, plans=load_plans(self.plans_file))
+        return replace(
+            self,
+            plans=self.plans or load_plans(self.plans_file),
+            credit_packs=self.credit_packs if self.credit_packs is not None else load_credit_packs(self.plans_file),
+        )
 
 
 def load_plans(path: Path) -> dict[str, Plan]:
@@ -122,3 +139,20 @@ def load_plans(path: Path) -> dict[str, Plan]:
     if not plans:
         raise ValueError(f"no plans defined in {path}")
     return plans
+
+
+def load_credit_packs(path: Path) -> dict[str, CreditPack]:
+    """The prepaid packs in the plans file. A file without ``credit_packs`` sells none."""
+    data = json.loads(Path(path).read_text())
+    packs: dict[str, CreditPack] = {}
+    for name, spec in (data.get("credit_packs") or {}).items():
+        screenshots, price = int(spec["screenshots"]), int(spec["price_usd_cents"])
+        if screenshots <= 0 or price <= 0:
+            raise ValueError(f"credit pack {name!r} needs a positive size and price")
+        packs[name] = CreditPack(
+            name=name,
+            screenshots=screenshots,
+            price_usd_cents=price,
+            title=str(spec.get("title", name.title())),
+        )
+    return packs

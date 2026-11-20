@@ -9,6 +9,8 @@
     python -m calotype.admin set-plan 3 starter
     python -m calotype.admin usage 3
     python -m calotype.admin contacts
+    python -m calotype.admin credits 3
+    python -m calotype.admin refund-credit pi_... [--yes] [--prorated] [--no-stripe]
 
 Keys made here are marked internal and never count as demand-test contacts.
 ``mark-internal`` does the same for a test key made through the website's
@@ -27,6 +29,16 @@ the subscription has to be cancelled by hand in the Stripe dashboard.
 for good, after cancelling a paid key's subscription as ``revoke-key`` does.
 Without ``--yes`` it only prints what it would delete. ``key-id`` reads a key
 from standard input, so it stays out of the shell history, and prints its id.
+
+``credits`` shows a key's prepaid credit and its purchases. ``refund-credit``
+undoes one purchase, named by its Stripe PaymentIntent id: it takes back the
+credit that is still unused (the pack's size or the key's whole balance,
+whichever is smaller; screenshots already taken stay taken) and refunds the
+payment through Stripe, in full, or with ``--prorated`` only the share that
+was unused. Without ``--yes`` it only prints what it would do. It needs
+``STRIPE_SECRET_KEY``; with ``--no-stripe`` it only takes the credit back, and
+the money has to be refunded by hand in the Stripe dashboard. Running it again
+after a failure finishes the job and never refunds twice.
 """
 
 from __future__ import annotations
@@ -36,10 +48,12 @@ import sys
 
 from .billing import ALREADY_ENDED, CANCELED, CANCELS_AT_PERIOD_END, BillingProviderError, stripe_for_admin
 from .config import Settings
-from .storage import ApiKey, current_month, open_configured_storage
+from .credits import credits_for_admin
+from .storage import ApiKey, CreditPurchase, Storage, current_month, open_configured_storage
 
 # Replaced in tests with a provider over a fake Stripe client.
 open_billing = stripe_for_admin
+open_credits = credits_for_admin
 
 _CANCEL_MESSAGES = {
     CANCELED: "Cancelled Stripe subscription {sub} now. It will not be charged again; no prorated refund was made.",
@@ -104,6 +118,89 @@ def describe_key(key: ApiKey) -> str:
     )
 
 
+def describe_purchase(p: CreditPurchase) -> str:
+    state = "paid"
+    if p.refunded_at:
+        how = f"Stripe refund {p.refund_id}" if p.refund_id else "no Stripe refund recorded"
+        state = f"refunded {p.refunded_at} ({p.credits_removed} credits taken back; {how})"
+    return (
+        f"{p.id}: key={p.key_id} pack={p.pack} screenshots={p.screenshots} "
+        f"paid=${p.amount_cents / 100:.2f} {p.currency} at={p.created_at} {state}"
+    )
+
+
+def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool, no_stripe: bool) -> int:
+    """Undo one prepaid purchase: take back its unused credit, then refund it through Stripe."""
+    purchase = store.get_credit_purchase(purchase_id)
+    if purchase is None:
+        print("no credit purchase with that PaymentIntent id", file=sys.stderr)
+        return 1
+    if purchase.refund_id:
+        print(f"already refunded: {describe_purchase(purchase)}", file=sys.stderr)
+        return 0
+
+    def refund_cents(removed: int) -> int:
+        return purchase.amount_cents * removed // purchase.screenshots if prorated else purchase.amount_cents
+
+    if not yes:
+        balance = store.get_credit_balance(purchase.key_id)
+        removed = purchase.credits_removed if purchase.refunded_at else min(purchase.screenshots, balance)
+        print(f"Would refund {describe_purchase(purchase)}", file=sys.stderr)
+        if purchase.refunded_at:
+            print(f"  its {removed} unused credits were already taken back", file=sys.stderr)
+        else:
+            print(
+                f"  take back {removed} of key {purchase.key_id}'s {balance} credits "
+                f"({purchase.screenshots - removed} of this pack are already used)",
+                file=sys.stderr,
+            )
+        how = "NOT through Stripe (--no-stripe): refund it by hand" if no_stripe else "through Stripe"
+        print(
+            f"  refund ${refund_cents(removed) / 100:.2f} of ${purchase.amount_cents / 100:.2f} {how}", file=sys.stderr
+        )
+        print("Run again with --yes to do it.", file=sys.stderr)
+        return 0
+
+    provider = None
+    if not no_stripe:
+        provider = open_credits()
+        if provider is None:
+            print(
+                "STRIPE_SECRET_KEY is not set, so the payment cannot be refunded from here. Nothing was changed. "
+                "Set it and run again, or pass --no-stripe to take the credit back and refund by hand.",
+                file=sys.stderr,
+            )
+            return 1
+    purchase, changed = store.refund_credit_purchase(purchase_id)
+    if changed:
+        print(f"took back {purchase.credits_removed} unused credits from key {purchase.key_id}", file=sys.stderr)
+    else:
+        print(f"the {purchase.credits_removed} unused credits had already been taken back", file=sys.stderr)
+    amount = refund_cents(purchase.credits_removed)
+    if provider is None:
+        print(
+            f"WARNING: --no-stripe: PaymentIntent {purchase.id} was NOT refunded. "
+            f"Refund ${amount / 100:.2f} by hand in the Stripe dashboard.",
+            file=sys.stderr,
+        )
+        return 0
+    if amount <= 0:
+        print("nothing of this pack was unused, so the prorated refund is $0.00; no refund was made", file=sys.stderr)
+        return 0
+    try:
+        refund_id = provider.refund(purchase, amount)
+    except BillingProviderError as e:
+        print(
+            f"Stripe could not refund PaymentIntent {purchase.id} ({e}). The credit was taken back; the money was "
+            "not returned. Run the same command again, or refund it by hand in the Stripe dashboard.",
+            file=sys.stderr,
+        )
+        return 1
+    store.set_credit_refund_id(purchase.id, refund_id)
+    print(f"refunded ${amount / 100:.2f} through Stripe: {refund_id}", file=sys.stderr)
+    return 0
+
+
 def _add_stripe_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--at-period-end",
@@ -153,6 +250,20 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("key_id", type=int)
 
     sub.add_parser("contacts", help="non-internal keys with a successful screenshot, by contact ordinal")
+
+    cr = sub.add_parser("credits", help="show a key's prepaid credit and its purchases")
+    cr.add_argument("key_id", type=int)
+
+    rc = sub.add_parser(
+        "refund-credit",
+        help="refund a prepaid purchase and take back its unused credit (dry run without --yes)",
+    )
+    rc.add_argument("purchase_id", help="the purchase's Stripe PaymentIntent id, pi_...")
+    rc.add_argument("--yes", action="store_true", help="really refund; without it, only show what would happen")
+    rc.add_argument("--prorated", action="store_true", help="refund only the unused share of the price, not all of it")
+    rc.add_argument(
+        "--no-stripe", action="store_true", help="do not touch Stripe; the money must then be refunded by hand"
+    )
 
     args = parser.parse_args(argv)
     settings = Settings.from_env()
@@ -210,6 +321,13 @@ def main(argv: list[str] | None = None) -> int:
             print("Would delete, for good:", file=sys.stderr)
             print(f"  the record of {describe_key(key)}", file=sys.stderr)
             print("  all of its monthly usage counts", file=sys.stderr)
+            credit, purchases = store.get_credit_balance(key.id), store.list_credit_purchases(key.id)
+            if credit or purchases:
+                print(
+                    f"  its {credit} unused prepaid credits and {len(purchases)} purchase records "
+                    "(nothing is refunded; use refund-credit first if money is owed)",
+                    file=sys.stderr,
+                )
             if sub_id:
                 when = "at the end of the paid month" if args.at_period_end else "now, with no prorated refund"
                 how = "NOT (--no-stripe)" if args.no_stripe else when
@@ -265,6 +383,20 @@ def main(argv: list[str] | None = None) -> int:
         month = current_month()
         print(f"{month}\t{store.get_usage(args.key_id, month)}")
         return 0
+
+    if args.cmd == "credits":
+        if store.get_key_by_id(args.key_id) is None:
+            print("no key with that id", file=sys.stderr)
+            return 1
+        print(f"credits\t{store.get_credit_balance(args.key_id)}")
+        for purchase in store.list_credit_purchases(args.key_id):
+            print(describe_purchase(purchase))
+        return 0
+
+    if args.cmd == "refund-credit":
+        return refund_credit(
+            store, args.purchase_id.strip(), yes=args.yes, prorated=args.prorated, no_stripe=args.no_stripe
+        )
 
     return 2
 
