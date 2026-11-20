@@ -30,6 +30,11 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     skewbald-checks job (free-reign ``ops/checks``) reads the pending ones,
     sends them, and sets ``status``, ``sent_at`` and ``to_hash`` (a keyed
     hash of the address, for its per-address monthly cap). Never the address.
+``{prefix}tries/{YYYY-MM-DD}``
+    The free tries of one UTC day (``storage.TryDay``): ``day``, ``total``,
+    ``rendered`` and one count per outcome. Never a URL, host or IP address.
+    ``rendered`` is the shared daily cap, taken by ``try_admit`` exactly as
+    ``try_consume`` takes a key's quota (below).
 
 No name, IP address or URL is stored; an email address only if the key's
 holder gave one, on the key's own document.
@@ -81,9 +86,11 @@ from .storage import (
     NOTICE_PENDING,
     REF_LABEL_PREFIX,
     REF_TAG,
+    TRY_OUTCOMES,
     ApiKey,
     Contact,
     Notice,
+    TryDay,
     generate_key,
     hash_key,
     source_from_label,
@@ -111,6 +118,7 @@ class FirestoreStorage:
         self._counter = self._client.collection(f"{collection_prefix}meta").document("key_ids")
         self._events = self._client.collection(f"{collection_prefix}stripe_events")
         self._notices = self._client.collection(f"{collection_prefix}notices")
+        self._tries = self._client.collection(f"{collection_prefix}tries")
 
     # --- plumbing -----------------------------------------------------------------
 
@@ -122,7 +130,7 @@ class FirestoreStorage:
 
     def collections(self) -> list[Any]:
         """The collections this store writes to (used by tests and cleanup)."""
-        return [self._keys, self._usage, self._counter.parent, self._events, self._notices]
+        return [self._keys, self._usage, self._counter.parent, self._events, self._notices, self._tries]
 
     @staticmethod
     def _increment(ref, field: str, by: int, *, create: dict | None = None) -> int:
@@ -370,6 +378,42 @@ class FirestoreStorage:
         names = {f.name for f in fields(Notice)}
         notices = [Notice(**{k: v for k, v in d.items() if k in names}) for d in docs]
         return sorted(notices, key=lambda n: (n.month, n.threshold))
+
+    # --- free tries (tries.py) -----------------------------------------------------------
+
+    def try_admit(self, day: str, limit: int) -> tuple[bool, int]:
+        """Atomically add one to the day's ``rendered`` count if it is under ``limit``.
+
+        The same read, increment and undo as ``try_consume``, so instances
+        sharing the database never let more than ``limit`` through in a day.
+        """
+        ref = self._tries.document(day)
+        snap = ref.get()
+        rendered = int(snap.get("rendered") or 0) if snap.exists else 0
+        if rendered >= limit:  # also covers limit <= 0; no write
+            return False, rendered
+        count = self._increment(ref, "rendered", 1, create={"day": day})
+        if count <= limit:
+            return True, count
+        return False, min(self._increment(ref, "rendered", -1), limit)
+
+    def record_try(self, day: str, outcome: str) -> None:
+        """Count one try and how it ended (one of ``TRY_OUTCOMES``), in one write."""
+        if outcome not in TRY_OUTCOMES:
+            raise ValueError(f"unknown try outcome {outcome!r}")
+        self._tries.document(day).set(
+            {"day": day, "total": firestore.Increment(1), outcome: firestore.Increment(1)}, merge=True
+        )
+
+    def try_days(self, days: list[str]) -> list[TryDay]:
+        """The counts for each of ``days``, in that order; zeros for a day with no tries."""
+        names = [f.name for f in fields(TryDay) if f.name != "day"]
+        found = {}
+        for snap in self._client.get_all([self._tries.document(d) for d in days]):
+            if snap.exists:
+                doc = snap.to_dict()
+                found[snap.id] = TryDay(snap.id, **{n: int(doc.get(n) or 0) for n in names})
+        return [found.get(d, TryDay(d)) for d in days]
 
     # --- contacts -----------------------------------------------------------------------
 

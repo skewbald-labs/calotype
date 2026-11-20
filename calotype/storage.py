@@ -25,6 +25,11 @@ address (the holder's ``DELETE /v1/keys/email``, the link in each notice, or
 ``delete_key`` removes a key's record, its usage counts and its notices for
 good, on the key holder's request (see the privacy notice).
 
+The free tries on the home page (``tries.py``) are counted per UTC day
+(``TryDay``): how many there were and how each ended. Never the URL, the host
+or the IP address. ``try_admit`` also enforces the daily cap on renders, for
+every instance at once.
+
 The "contact ordinal" for the demand test is derived, not stored: it is the
 creation order of non-internal keys that have made at least one successful
 screenshot (see ``list_contacts``).
@@ -122,6 +127,26 @@ def source_from_label(label: str) -> str:
     return label[len(REF_LABEL_PREFIX):] if label.startswith(REF_LABEL_PREFIX) else ""
 
 
+# How a free try ended. ``total`` counts every try; each try also adds one to
+# exactly one of these. ``rendered`` (tries let through to the browser, the
+# count the daily cap applies to) is separate: it is taken before the capture.
+TRY_OUTCOMES = ("succeeded", "failed", "refused", "limited", "capped")
+
+
+@dataclass(frozen=True)
+class TryDay:
+    """One UTC day's free tries: counts only, never a URL, host or IP address."""
+
+    day: str  # YYYY-MM-DD, UTC
+    total: int = 0
+    rendered: int = 0  # let through to the browser, against the daily cap
+    succeeded: int = 0  # an image was returned
+    failed: int = 0  # the capture ran and failed (timeout, unreachable, busy...)
+    refused: int = 0  # not a valid URL, or an address the policy refuses
+    limited: int = 0  # over the per-IP limit
+    capped: int = 0  # the day's cap was already reached
+
+
 def hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
@@ -144,6 +169,11 @@ def generate_key() -> str:
 def current_month(now: datetime | None = None) -> str:
     now = now or datetime.now(UTC)
     return now.strftime("%Y-%m")
+
+
+def current_day(now: datetime | None = None) -> str:
+    now = now or datetime.now(UTC)
+    return now.strftime("%Y-%m-%d")
 
 
 class Storage(Protocol):
@@ -174,6 +204,9 @@ class Storage(Protocol):
     def keys_with_email(self, email: str) -> list[int]: ...
     def queue_notice(self, notice: Notice) -> bool: ...
     def list_notices(self, key_id: int) -> list[Notice]: ...
+    def try_admit(self, day: str, limit: int) -> tuple[bool, int]: ...
+    def record_try(self, day: str, outcome: str) -> None: ...
+    def try_days(self, days: list[str]) -> list[TryDay]: ...
 
 
 SCHEMA = """
@@ -216,6 +249,16 @@ CREATE TABLE IF NOT EXISTS notices (
     created_at TEXT NOT NULL,
     sent_at TEXT,
     to_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS tries (
+    day TEXT PRIMARY KEY,
+    total INTEGER NOT NULL DEFAULT 0,
+    rendered INTEGER NOT NULL DEFAULT 0,
+    succeeded INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    refused INTEGER NOT NULL DEFAULT 0,
+    limited INTEGER NOT NULL DEFAULT 0,
+    capped INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -494,10 +537,58 @@ class SQLiteStorage:
             ).fetchall()
         return [Notice(int(r[0]), r[1], int(r[2]), int(r[3]), int(r[4]), *r[5:]) for r in rows]
 
+    # --- free tries (tries.py) -----------------------------------------------------------
+
+    def try_admit(self, day: str, limit: int) -> tuple[bool, int]:
+        """Atomically add one to the day's ``rendered`` count if it is under ``limit``.
+
+        Returns (allowed, count after the call). Not refunded when the capture
+        fails: the cap limits rendering, and a failed render costs as much.
+        """
+        with self._lock:
+            if limit <= 0:
+                return False, self._tries_rendered_locked(day)
+            row = self._db().execute(
+                "INSERT INTO tries (day, rendered) VALUES (?, 1) "
+                "ON CONFLICT (day) DO UPDATE SET rendered = rendered + 1 WHERE tries.rendered < ? "
+                "RETURNING rendered",
+                (day, limit),
+            ).fetchone()
+            if row is None:
+                return False, self._tries_rendered_locked(day)
+            return True, int(row[0])
+
+    def record_try(self, day: str, outcome: str) -> None:
+        """Count one try and how it ended (one of ``TRY_OUTCOMES``)."""
+        if outcome not in TRY_OUTCOMES:
+            raise ValueError(f"unknown try outcome {outcome!r}")
+        with self._lock:
+            # outcome is one of the fixed column names above, never input.
+            self._db().execute(
+                f"INSERT INTO tries (day, total, {outcome}) VALUES (?, 1, 1) "
+                f"ON CONFLICT (day) DO UPDATE SET total = total + 1, {outcome} = {outcome} + 1",
+                (day,),
+            )
+
+    def try_days(self, days: list[str]) -> list[TryDay]:
+        """The counts for each of ``days``, in that order; zeros for a day with no tries."""
+        with self._lock:
+            rows = self._db().execute(
+                f"SELECT {_TRY_COLUMNS} FROM tries WHERE day IN ({', '.join('?' * len(days))})", days
+            ).fetchall() if days else []
+        found = {r[0]: TryDay(r[0], *(int(v) for v in r[1:])) for r in rows}
+        return [found.get(d, TryDay(d)) for d in days]
+
+    def _tries_rendered_locked(self, day: str) -> int:
+        row = self._db().execute("SELECT rendered FROM tries WHERE day = ?", (day,)).fetchone()
+        return int(row[0]) if row else 0
+
     def _usage_locked(self, key_id: int, month: str) -> int:
         row = self._db().execute("SELECT count FROM usage WHERE key_id = ? AND month = ?", (key_id, month)).fetchone()
         return int(row[0]) if row else 0
 
+
+_TRY_COLUMNS = "day, total, rendered, succeeded, failed, refused, limited, capped"
 
 _KEY_COLUMNS = (
     "id, plan, label, created_at, revoked_at, internal, successful_screenshots, "

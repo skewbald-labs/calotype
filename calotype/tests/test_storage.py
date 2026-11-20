@@ -433,3 +433,37 @@ def test_find_key_by_ref(store):
     assert store.find_key_by_ref("0" * 12 if not key_ref(raw_a).startswith("0" * 12) else "f" * 12) is None
     for bad in ("", "abc", key_ref(raw_a).upper(), key_ref(raw_a) + "0", "zzzzzzzzzzzz", raw_a):
         assert store.find_key_by_ref(bad) is None, bad
+
+
+# --- free tries: per-day counts and the shared daily cap -----------------------------------
+
+
+def test_try_admit_counts_up_to_the_daily_limit(store):
+    assert [store.try_admit("2026-11-20", 2) for _ in range(3)] == [(True, 1), (True, 2), (False, 2)]
+    # Another day starts again from zero.
+    assert store.try_admit("2026-11-21", 2) == (True, 1)
+    assert store.try_admit("2026-11-22", 0) == (False, 0)
+
+
+def test_parallel_try_admits_never_pass_the_daily_limit(store):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: store.try_admit("2026-11-20", 5), range(16)))
+    assert sum(ok for ok, _ in results) == 5
+    assert store.try_days(["2026-11-20"])[0].rendered == 5
+
+
+def test_record_try_counts_total_and_outcome(store):
+    from calotype.storage import TryDay
+
+    store.try_admit("2026-11-20", 10)
+    for outcome in ("succeeded", "succeeded", "failed", "refused", "limited", "capped"):
+        store.record_try("2026-11-20", outcome)
+    store.record_try("2026-11-19", "refused")
+    with pytest.raises(ValueError):
+        store.record_try("2026-11-20", "total")
+    assert store.try_days(["2026-11-20", "2026-11-19", "2026-11-18"]) == [
+        TryDay("2026-11-20", total=6, rendered=1, succeeded=2, failed=1, refused=1, limited=1, capped=1),
+        TryDay("2026-11-19", total=1, refused=1),
+        TryDay("2026-11-18"),
+    ]
+    assert store.try_days([]) == []
