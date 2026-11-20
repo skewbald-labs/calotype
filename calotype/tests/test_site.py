@@ -394,7 +394,7 @@ def test_home_leads_with_the_agent_job(site):
 
 def test_agents_page_has_a_block_per_client_and_a_key_button(site):
     doc = site.get("/agents").text
-    for anchor in ("claude-code", "cursor", "vscode", "codex", "n8n", "other", "check"):
+    for anchor in ("claude-code", "cursor", "vscode", "windsurf", "claude-desktop", "codex", "n8n", "other", "check"):
         assert f'id="{anchor}"' in doc, anchor
     assert '"servers"' in doc and '"mcpServers"' in doc and "bearer_token_env_var" in doc
     assert "HTTP Streamable" in doc and "1.104.0" in doc  # n8n needs the streamable transport
@@ -508,3 +508,117 @@ def test_agents_page_says_when_to_use_playwright_instead(site):
     assert "localhost" in block and "no browser to install" in block
     assert 'href="/switch"' in block
     assert 'href="#playwright"' in doc  # listed in the page's contents
+
+
+# --- first screen: install buttons and the demo image (running plan H2) ----------------------
+
+DEMO_IMAGE = "/images/demo-pricing-dark.webp"
+DEMO_REQUEST = "-d url=https://calotype.dev/pricing -d dark_mode=true -d format=webp"
+REPO_README = SITE_DIR.parents[1] / "README.md"
+
+
+def test_demo_image_is_served_small_and_as_webp(site):
+    r = site.get(DEMO_IMAGE)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/webp"
+    assert r.content[:4] == b"RIFF" and r.content[8:12] == b"WEBP"
+    assert len(r.content) < 150 * 1024
+    assert "sandbox" in r.headers["content-security-policy"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert site.get("/images/nothing-here.webp").status_code == 404
+
+
+@pytest.mark.parametrize("page", PAGES, ids=PAGE_IDS)
+def test_page_images_come_from_the_site_and_are_served(site, page):
+    r = site.get(page.path)
+    assert "img-src 'self' data:;" in r.headers["content-security-policy"]
+    for tag in re.findall(r"<img\b[^>]*>", r.text):
+        src = re.search(r'src="([^"]+)"', tag).group(1)
+        assert src.startswith(("/", "data:")), tag
+        assert re.search(r'alt="[^"]{20,}"', tag), "every image says what it shows"
+        if src.startswith("/"):
+            assert site.get(src).status_code == 200, src
+
+
+def test_agents_first_screen_has_buttons_then_the_request_and_its_image(site):
+    from calotype.install_links import SITE
+
+    doc = site.get("/agents").text
+    first_screen = doc[doc.index("<h1>"):doc.index('<ul class="toc">')]
+    hrefs = [html.unescape(h) for h in re.findall(r'<a class="button" href="([^"]+)"', first_screen)]
+    assert hrefs == [SITE.cursor, SITE.vscode]
+    assert "CALOTYPE_KEY" in first_screen and "secret storage" in first_screen
+    request = html.unescape(re.sub(r"<[^>]+>", "", first_screen))
+    assert DEMO_REQUEST in request and "/v1/screenshot" in request
+    assert first_screen.index(DEMO_REQUEST) < first_screen.index(f'src="{DEMO_IMAGE}"')
+    img = re.search(r"<img\b[^>]*>", first_screen).group(0)
+    assert "20 November 2026" in img and 'width="1280" height="800"' in img
+    # Windsurf and Claude Desktop, each with what its docs say it needs.
+    assert '"serverUrl"' in doc and "${env:CALOTYPE_KEY}" in doc
+    desktop = doc[doc.index('id="claude-desktop"'):doc.index('id="codex"')]
+    assert "Request headers" in desktop and "beta" in desktop and "mcp-remote" in desktop
+    assert "No sign-in" in desktop
+
+
+def _vscode_payload(link: str) -> dict:
+    """Undo the web redirect, then parse as VS Code does: the URI decodes its query once,
+    and the handler runs decodeURIComponent on it again before JSON.parse."""
+    import json
+    from urllib.parse import unquote
+
+    if link.startswith("https://vscode.dev/redirect?url="):
+        link = unquote(link.removeprefix("https://vscode.dev/redirect?url="))
+    assert link.startswith("vscode:mcp/install?")
+    return json.loads(unquote(unquote(link.removeprefix("vscode:mcp/install?"))))
+
+
+def _cursor_config(link: str) -> tuple[str, dict]:
+    import json
+    from urllib.parse import parse_qs, urlsplit
+
+    query = parse_qs(urlsplit(link).query)
+    return query["name"][0], json.loads(base64.b64decode(query["config"][0], validate=True))
+
+
+def test_install_links_decode_to_a_keyless_config_with_their_tag():
+    from calotype import install_links as links
+    from calotype.storage import REF_TAG
+
+    for buttons, suffix in ((links.README, ""), (links.SITE, "-site")):
+        name, cursor = _cursor_config(buttons.cursor)
+        assert name == "calotype"
+        assert cursor == {
+            "url": f"https://calotype.dev/mcp?ref=btn-cursor{suffix}",
+            "headers": {"Authorization": "Bearer ${env:CALOTYPE_KEY}"},
+        }
+        vscode = _vscode_payload(buttons.vscode)
+        assert vscode["name"] == "calotype" and vscode["type"] == "http"
+        assert vscode["url"] == f"https://calotype.dev/mcp?ref=btn-vscode{suffix}"
+        assert vscode["headers"] == {"Authorization": "Bearer ${input:calotype-key}"}
+        assert vscode["inputs"] == [
+            {"type": "promptString", "id": "calotype-key", "description": "Calotype API key, starts cal_", "password": True}
+        ]
+        for tag in (f"btn-cursor{suffix}", f"btn-vscode{suffix}"):
+            assert REF_TAG.match(tag)
+    assert links.README.cursor.startswith("https://cursor.com/en/install-mcp?name=calotype&config=")
+    assert links.README.vscode.startswith("https://vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F")
+    assert links.SITE.cursor.startswith("cursor://anysphere.cursor-deeplink/mcp/install?name=calotype&config=")
+
+
+def test_readme_first_screen_matches_the_generated_links_and_the_served_image():
+    from calotype.install_links import readme_markdown
+
+    readme = REPO_README.read_text(encoding="utf-8")
+    top = readme[:readme.index("## Client setup")]
+    assert readme_markdown() in top
+    assert "Skewbald, an AI agent" in top
+    assert "https://calotype.dev/mcp?ref=gh-readme" in top
+    assert top.index("https://calotype.dev/mcp?ref=gh-readme") < top.index(DEMO_REQUEST)
+    image = re.search(r"!\[([^\]]+)\]\((https://calotype\.dev/images/[^)]+)\)", top)
+    assert image and "20 November 2026" in image.group(1)
+    assert top.index(DEMO_REQUEST) < image.start()
+    assert (SITE_DIR / "images" / image.group(2).rsplit("/", 1)[1]).is_file()
+    for client in ("### Claude Code", "### Cursor", "### VS Code", "### Windsurf", "### Claude Desktop", "### Codex"):
+        assert client in readme, client
+    assert "calotype.dev/agents#n8n" in readme
+    assert re.search(r"cal_[A-Za-z0-9]{8,}", readme) is None
