@@ -9,12 +9,21 @@ What is stored, and nothing else: the SHA-256 hash of each key (never the
 key), its plan, its creation time, whether it is Calotype's own
 (``internal``: made by an operator, or a test key an operator made through
 the website and marked with ``set_internal``), an optional operator label, usage counts, a revocation time,
-and for paid keys the Stripe customer id and subscription id. Separately, the
-ids of Stripe webhook events already handled, so a repeated delivery is not
-applied twice. No email, name, IP address or other personal data.
+for paid keys the Stripe customer id and subscription id, and, only if the
+holder gave one, an email address for quota notices (``email``). Separately,
+the ids of Stripe webhook events already handled, so a repeated delivery is
+not applied twice, and the quota notices queued for keys with an address
+(``Notice``: key id, month, threshold, counts; never the address). No name, IP
+address or other personal data.
 
-``delete_key`` removes a key's record and its usage counts for good, on the
-key holder's request (see the privacy notice).
+The email address is used for one thing: telling the holder when the key
+reaches 80% and 100% of its monthly quota (``notices.py``). The service only
+queues a notice; a separate job sends it and marks it sent. Removing the
+address (the holder's ``DELETE /v1/keys/email``, the link in each notice, or
+``admin remove-email``), revoking the key, or deleting it clears the address.
+
+``delete_key`` removes a key's record, its usage counts and its notices for
+good, on the key holder's request (see the privacy notice).
 
 The "contact ordinal" for the demand test is derived, not stored: it is the
 creation order of non-internal keys that have made at least one successful
@@ -28,7 +37,7 @@ import re
 import secrets
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -51,6 +60,45 @@ class ApiKey:
     # Set by the Stripe webhook once a key has paid. Ids only; Stripe holds the rest.
     stripe_customer_id: str | None = None
     stripe_subscription_id: str | None = None
+    # Optional, for quota notices only. Kept out of repr so it never lands in a log line.
+    email: str | None = field(default=None, repr=False)
+
+
+# A notice goes out at most once per key, month and threshold (percent of the quota).
+NOTICE_THRESHOLDS = (80, 100)
+NOTICE_PENDING = "pending"
+
+
+@dataclass(frozen=True)
+class Notice:
+    """A quota notice queued by the service for the sender job (see ``notices.py``).
+
+    It holds what the email says, never the address: the job reads the
+    address from the key's record when it sends, so an address removed in
+    between is never written to.
+    """
+
+    key_id: int
+    month: str  # YYYY-MM, UTC
+    threshold: int  # 80 or 100
+    used: int
+    quota: int
+    plan: str
+    key_ref: str
+    resets_at: str
+    upgrade: str  # the same line the MCP tool adds near the limit (app.upgrade_text)
+    origin: str  # where the removal link points
+    status: str = NOTICE_PENDING  # pending, then sent, dropped, capped or failed (set by the job)
+    created_at: str = ""
+    sent_at: str | None = None
+
+    @property
+    def id(self) -> str:
+        return notice_id(self.key_id, self.month, self.threshold)
+
+
+def notice_id(key_id: int, month: str, threshold: int) -> str:
+    return f"{int(key_id)}_{month}_{int(threshold)}"
 
 
 @dataclass(frozen=True)
@@ -100,7 +148,9 @@ def current_month(now: datetime | None = None) -> str:
 
 class Storage(Protocol):
     def init(self) -> None: ...
-    def create_key(self, plan: str, label: str = "", *, internal: bool = False) -> tuple[str, ApiKey]: ...
+    def create_key(
+        self, plan: str, label: str = "", *, internal: bool = False, email: str | None = None
+    ) -> tuple[str, ApiKey]: ...
     def get_key(self, raw_key: str) -> ApiKey | None: ...
     def list_keys(self) -> list[ApiKey]: ...
     def revoke_key(self, key_id: int) -> bool: ...
@@ -120,6 +170,10 @@ class Storage(Protocol):
     def record_success(self, key_id: int) -> int: ...
     def list_contacts(self) -> list[Contact]: ...
     def contact_ordinal(self, key_id: int) -> int | None: ...
+    def set_email(self, key_id: int, email: str | None) -> bool: ...
+    def keys_with_email(self, email: str) -> list[int]: ...
+    def queue_notice(self, notice: Notice) -> bool: ...
+    def list_notices(self, key_id: int) -> list[Notice]: ...
 
 
 SCHEMA = """
@@ -133,7 +187,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     internal INTEGER NOT NULL DEFAULT 0,
     successful_screenshots INTEGER NOT NULL DEFAULT 0,
     stripe_customer_id TEXT,
-    stripe_subscription_id TEXT
+    stripe_subscription_id TEXT,
+    email TEXT
 );
 CREATE TABLE IF NOT EXISTS usage (
     key_id INTEGER NOT NULL REFERENCES api_keys(id),
@@ -145,6 +200,23 @@ CREATE TABLE IF NOT EXISTS stripe_events (
     event_id TEXT PRIMARY KEY,
     processed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS notices (
+    id TEXT PRIMARY KEY,
+    key_id INTEGER NOT NULL REFERENCES api_keys(id),
+    month TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    used INTEGER NOT NULL,
+    quota INTEGER NOT NULL,
+    plan TEXT NOT NULL,
+    key_ref TEXT NOT NULL,
+    resets_at TEXT NOT NULL,
+    upgrade TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    to_hash TEXT
+);
 """
 
 # Columns added after the first release. ``init`` adds any that an older
@@ -152,8 +224,13 @@ CREATE TABLE IF NOT EXISTS stripe_events (
 _ADDED_KEY_COLUMNS = {
     "stripe_customer_id": "TEXT",
     "stripe_subscription_id": "TEXT",
+    "email": "TEXT",
 }
-_INDEXES = "CREATE INDEX IF NOT EXISTS api_keys_subscription ON api_keys (stripe_subscription_id);"
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS api_keys_subscription ON api_keys (stripe_subscription_id);
+CREATE INDEX IF NOT EXISTS api_keys_email ON api_keys (email);
+CREATE INDEX IF NOT EXISTS notices_key ON notices (key_id);
+"""
 
 
 class SQLiteStorage:
@@ -189,16 +266,18 @@ class SQLiteStorage:
                 self._conn.close()
                 self._conn = None
 
-    def create_key(self, plan: str, label: str = "", *, internal: bool = False) -> tuple[str, ApiKey]:
+    def create_key(
+        self, plan: str, label: str = "", *, internal: bool = False, email: str | None = None
+    ) -> tuple[str, ApiKey]:
         raw = generate_key()
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             cur = self._db().execute(
-                "INSERT INTO api_keys (key_hash, plan, label, created_at, internal) VALUES (?, ?, ?, ?, ?)",
-                (hash_key(raw), plan, label, now, 1 if internal else 0),
+                "INSERT INTO api_keys (key_hash, plan, label, created_at, internal, email) VALUES (?, ?, ?, ?, ?, ?)",
+                (hash_key(raw), plan, label, now, 1 if internal else 0, email),
             )
             key_id = int(cur.lastrowid)
-        return raw, ApiKey(key_id, plan, label, now, False, internal, 0)
+        return raw, ApiKey(key_id, plan, label, now, False, internal, 0, email=email)
 
     def get_key(self, raw_key: str) -> ApiKey | None:
         with self._lock:
@@ -216,15 +295,18 @@ class SQLiteStorage:
         return [_row_to_key(r) for r in rows]
 
     def revoke_key(self, key_id: int) -> bool:
+        """Revoke the key and forget its email address. False if it was already revoked."""
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             cur = self._db().execute(
-                "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", (now, key_id)
+                "UPDATE api_keys SET revoked_at = ?, email = NULL WHERE id = ? AND revoked_at IS NULL", (now, key_id)
             )
         return cur.rowcount == 1
 
     def delete_key(self, key_id: int) -> bool:
-        """Delete the key's record and all its usage counts. False if there was no such key.
+        """Delete the key's record (with its email address), its usage counts and its notices.
+
+        False if there was no such key.
 
         Ids are never handed out again (``AUTOINCREMENT``), so a late Stripe
         event for a deleted key finds no key rather than another one.
@@ -234,6 +316,7 @@ class SQLiteStorage:
             db.execute("BEGIN IMMEDIATE")
             try:
                 db.execute("DELETE FROM usage WHERE key_id = ?", (key_id,))
+                db.execute("DELETE FROM notices WHERE key_id = ?", (key_id,))
                 cur = db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
                 db.execute("COMMIT")
             except BaseException:
@@ -375,6 +458,42 @@ class SQLiteStorage:
                 return c.ordinal
         return None
 
+    # --- the optional email address and quota notices ----------------------------------
+
+    def set_email(self, key_id: int, email: str | None) -> bool:
+        """Set, replace or (with None) remove the key's address. False if there is no such key."""
+        with self._lock:
+            cur = self._db().execute("UPDATE api_keys SET email = ? WHERE id = ?", (email, key_id))
+        return cur.rowcount == 1
+
+    def keys_with_email(self, email: str) -> list[int]:
+        """Ids of the keys that hold this exact address (for a "stop" reply)."""
+        with self._lock:
+            rows = self._db().execute("SELECT id FROM api_keys WHERE email = ? ORDER BY id", (email,)).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def queue_notice(self, notice: Notice) -> bool:
+        """Record a pending notice. False if this key, month and threshold already has one."""
+        now = notice.created_at or datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            cur = self._db().execute(
+                "INSERT INTO notices (id, key_id, month, threshold, used, quota, plan, key_ref, resets_at, upgrade, "
+                "origin, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (id) DO NOTHING",
+                (notice.id, notice.key_id, notice.month, notice.threshold, notice.used, notice.quota, notice.plan,
+                 notice.key_ref, notice.resets_at, notice.upgrade, notice.origin, NOTICE_PENDING, now),
+            )
+        return cur.rowcount == 1
+
+    def list_notices(self, key_id: int) -> list[Notice]:
+        with self._lock:
+            rows = self._db().execute(
+                "SELECT key_id, month, threshold, used, quota, plan, key_ref, resets_at, upgrade, origin, status, "
+                "created_at, sent_at FROM notices WHERE key_id = ? ORDER BY month, threshold",
+                (key_id,),
+            ).fetchall()
+        return [Notice(int(r[0]), r[1], int(r[2]), int(r[3]), int(r[4]), *r[5:]) for r in rows]
+
     def _usage_locked(self, key_id: int, month: str) -> int:
         row = self._db().execute("SELECT count FROM usage WHERE key_id = ? AND month = ?", (key_id, month)).fetchone()
         return int(row[0]) if row else 0
@@ -382,7 +501,7 @@ class SQLiteStorage:
 
 _KEY_COLUMNS = (
     "id, plan, label, created_at, revoked_at, internal, successful_screenshots, "
-    "stripe_customer_id, stripe_subscription_id"
+    "stripe_customer_id, stripe_subscription_id, email"
 )
 
 
@@ -397,6 +516,7 @@ def _row_to_key(row) -> ApiKey:
         successful_screenshots=int(row[6]),
         stripe_customer_id=row[7],
         stripe_subscription_id=row[8],
+        email=row[9],
     )
 
 

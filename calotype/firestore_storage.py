@@ -14,7 +14,8 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     ``label``, ``created_at`` (ISO 8601, UTC), ``revoked_at`` (null or ISO
     8601), ``internal`` (bool), ``successful_screenshots`` (int),
     ``stripe_customer_id`` and ``stripe_subscription_id`` (null until the key
-    pays; documents written before these fields existed simply lack them).
+    pays; documents written before these fields existed simply lack them),
+    and ``email`` (null unless the holder gave an address for quota notices).
 ``{prefix}usage/{id}_{YYYY-MM}``
     ``key_id``, ``month``, ``count``: screenshots counted this month.
 ``{prefix}meta/key_ids``
@@ -23,8 +24,15 @@ Layout, under a configurable collection prefix (default ``calotype_``):
 ``{prefix}stripe_events/{event id}``
     ``processed_at``: one document per Stripe webhook event already handled.
     ``create`` fails if the document exists, which makes recording atomic.
+``{prefix}notices/{id}_{YYYY-MM}_{threshold}``
+    A quota notice (``storage.Notice``), queued by the service with
+    ``create``, so a key gets at most one per month and threshold. The
+    skewbald-checks job (free-reign ``ops/checks``) reads the pending ones,
+    sends them, and sets ``status``, ``sent_at`` and ``to_hash`` (a keyed
+    hash of the address, for its per-address monthly cap). Never the address.
 
-No email, name, IP address or URL is stored.
+No name, IP address or URL is stored; an email address only if the key's
+holder gave one, on the key's own document.
 
 Counters change through Firestore's atomic ``Increment`` transform, which
 the server applies in order and which returns the value it produced. That
@@ -60,6 +68,7 @@ automatically, so no composite index has to be deployed.
 from __future__ import annotations
 
 import time
+from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from typing import Any
 
@@ -67,7 +76,18 @@ from google.api_core.exceptions import Aborted, AlreadyExists, NotFound
 from google.cloud import firestore
 from google.cloud.firestore import FieldFilter
 
-from .storage import KEY_REF, REF_LABEL_PREFIX, REF_TAG, ApiKey, Contact, generate_key, hash_key, source_from_label
+from .storage import (
+    KEY_REF,
+    NOTICE_PENDING,
+    REF_LABEL_PREFIX,
+    REF_TAG,
+    ApiKey,
+    Contact,
+    Notice,
+    generate_key,
+    hash_key,
+    source_from_label,
+)
 
 DEFAULT_COLLECTION_PREFIX = "calotype_"
 
@@ -90,6 +110,7 @@ class FirestoreStorage:
         self._usage = self._client.collection(f"{collection_prefix}usage")
         self._counter = self._client.collection(f"{collection_prefix}meta").document("key_ids")
         self._events = self._client.collection(f"{collection_prefix}stripe_events")
+        self._notices = self._client.collection(f"{collection_prefix}notices")
 
     # --- plumbing -----------------------------------------------------------------
 
@@ -101,7 +122,7 @@ class FirestoreStorage:
 
     def collections(self) -> list[Any]:
         """The collections this store writes to (used by tests and cleanup)."""
-        return [self._keys, self._usage, self._counter.parent, self._events]
+        return [self._keys, self._usage, self._counter.parent, self._events, self._notices]
 
     @staticmethod
     def _increment(ref, field: str, by: int, *, create: dict | None = None) -> int:
@@ -125,7 +146,9 @@ class FirestoreStorage:
 
     # --- keys -------------------------------------------------------------------------
 
-    def create_key(self, plan: str, label: str = "", *, internal: bool = False) -> tuple[str, ApiKey]:
+    def create_key(
+        self, plan: str, label: str = "", *, internal: bool = False, email: str | None = None
+    ) -> tuple[str, ApiKey]:
         raw = generate_key()
         key_hash = hash_key(raw)
         now = datetime.now(UTC).isoformat(timespec="seconds")
@@ -142,9 +165,10 @@ class FirestoreStorage:
                 "successful_screenshots": 0,
                 "stripe_customer_id": None,
                 "stripe_subscription_id": None,
+                "email": email,
             }
         )
-        return raw, ApiKey(key_id, plan, label, now, False, internal, 0)
+        return raw, ApiKey(key_id, plan, label, now, False, internal, 0, email=email)
 
     def get_key(self, raw_key: str) -> ApiKey | None:
         docs = list(self._keys.where(filter=FieldFilter("key_hash", "==", hash_key(raw_key))).limit(1).stream())
@@ -162,24 +186,25 @@ class FirestoreStorage:
             snap = ref.get(transaction=t)
             if not snap.exists or snap.get("revoked_at") is not None:
                 return False
-            t.update(ref, {"revoked_at": now})
+            t.update(ref, {"revoked_at": now, "email": None})  # a revoked key keeps no address
             return True
 
         return revoke(self._client.transaction())
 
     def delete_key(self, key_id: int) -> bool:
-        """Delete the key's document and all its usage documents. False if there was no such key.
+        """Delete the key's document (with its email address), its usage and its notice documents.
 
-        Usage documents go first, so a run cut short leaves the key document
+        False if there was no such key. Usage and notice documents go first, so a run cut short leaves the key document
         to find and delete again. The counter in ``meta/key_ids`` is not
         lowered, so the id is never handed out again.
         """
         ref = self._key_ref(key_id)
         exists = ref.get().exists
         usage = self._usage.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()
+        notices = self._notices.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()
         batch = self._client.batch()
         pending = 0
-        for doc in usage:
+        for doc in [*usage, *notices]:
             batch.delete(doc.reference)
             pending += 1
             if pending == 400:  # a batch takes at most 500 writes
@@ -315,6 +340,37 @@ class FirestoreStorage:
         except NotFound:
             return 0
 
+    # --- the optional email address and quota notices ----------------------------------
+
+    def set_email(self, key_id: int, email: str | None) -> bool:
+        """Set, replace or (with None) remove the key's address. False if there is no such key."""
+        try:
+            self._key_ref(key_id).update({"email": email})
+        except NotFound:
+            return False
+        return True
+
+    def keys_with_email(self, email: str) -> list[int]:
+        docs = self._keys.where(filter=FieldFilter("email", "==", email)).stream()
+        return sorted(int(d.get("id")) for d in docs)
+
+    def queue_notice(self, notice: Notice) -> bool:
+        """Record a pending notice. False if this key, month and threshold already has one."""
+        data = asdict(notice)
+        data["status"] = NOTICE_PENDING
+        data["created_at"] = notice.created_at or datetime.now(UTC).isoformat(timespec="seconds")
+        try:
+            self._notices.document(notice.id).create(data)
+        except AlreadyExists:
+            return False
+        return True
+
+    def list_notices(self, key_id: int) -> list[Notice]:
+        docs = [d.to_dict() for d in self._notices.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()]
+        names = {f.name for f in fields(Notice)}
+        notices = [Notice(**{k: v for k, v in d.items() if k in names}) for d in docs]
+        return sorted(notices, key=lambda n: (n.month, n.threshold))
+
     # --- contacts -----------------------------------------------------------------------
 
     def list_contacts(self) -> list[Contact]:
@@ -367,4 +423,5 @@ def _doc_to_key(d: dict) -> ApiKey:
         successful_screenshots=int(d.get("successful_screenshots", 0)),
         stripe_customer_id=d.get("stripe_customer_id"),
         stripe_subscription_id=d.get("stripe_subscription_id"),
+        email=d.get("email"),
     )

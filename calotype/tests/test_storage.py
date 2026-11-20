@@ -99,8 +99,10 @@ def test_stores_only_the_hash_and_the_listed_fields(store):
     assert raw not in dump and hash_key(raw) in dump
     assert stored_key_fields(store) == {
         "id", "key_hash", "plan", "label", "created_at", "revoked_at", "internal", "successful_screenshots",
-        "stripe_customer_id", "stripe_subscription_id",
+        "stripe_customer_id", "stripe_subscription_id", "email",
     }
+    # No address unless the holder gives one.
+    assert key.email is None and store.get_key(raw).email is None
 
 
 # --- billing (Stripe ids and processed webhook events) ----------------------------------
