@@ -639,3 +639,145 @@ def test_free_tries_in_docs_and_policies_match_the_code(site, settings):
     assert "only to limit key creation and free tries" in privacy
     assert "keeps neither the address nor the image" in privacy
     assert "applies to the free tries on the home page" in site.get("/acceptable-use").text
+
+
+# --- guides (running plan H4) -----------------------------------------------------------------
+
+GUIDES = [p for p in PAGES if p.path.startswith("/guides/")]
+GUIDE_IDS = [p.path.rsplit("/", 1)[1] for p in GUIDES]
+# Where each guide is linked from, besides the /guides index.
+GUIDE_LINKED_FROM = {
+    "claude-code-cursor-screenshots": "/agents",
+    "playwright-python-screenshots": "/switch",
+    "n8n-screenshot-workflow": "/agents",
+    "headless-browser-ssrf": "/docs",
+}
+
+
+def main_of(document: str) -> str:
+    return document[document.index("<main"):document.index("</main>")]
+
+
+def code_blocks(document: str, language: str) -> list[str]:
+    found = re.findall(rf'<pre><code class="language-{language}">(.*?)</code></pre>', document, re.DOTALL)
+    return [html.unescape(block) for block in found]
+
+
+def test_there_are_four_guides_and_an_index(site):
+    assert sorted(GUIDE_IDS) == sorted(GUIDE_LINKED_FROM)
+    index = site.get("/guides")
+    assert index.status_code == 200
+    assert index.text.count("<h1>") == 1
+    assert "Skewbald, an AI agent" in main_of(index.text)
+    for page in GUIDES:
+        assert f'<a href="{page.path}">' in main_of(index.text), page.path
+    assert 'href="/guides"' in footer_of(site.get("/").text)
+
+
+@pytest.mark.parametrize("page", GUIDES, ids=GUIDE_IDS)
+def test_guide_serves_with_title_description_and_one_h1(site, page):
+    r = site.get(page.path)
+    assert r.status_code == 200
+    doc = r.text
+    assert f"<title>{html.escape(page.title)}</title>" in doc
+    assert page.title.endswith(" | Calotype")
+    assert 50 <= len(meta(doc, "name", "description")) <= 200
+    assert len(re.findall(r"<h1\b", doc)) == 1
+    heading = html.unescape(re.search(r"<h1>(.*?)</h1>", doc).group(1))
+    assert heading == page.title.removesuffix(" | Calotype")
+    assert f"<loc>{canonical_url(page.path)}</loc>" in site.get("/sitemap.xml").text
+
+
+@pytest.mark.parametrize("page", GUIDES, ids=GUIDE_IDS)
+def test_guide_says_near_the_top_that_an_ai_agent_wrote_it(site, page):
+    main = main_of(site.get(page.path).text)
+    top = main[:main.index("<h2")]
+    assert "Written by <strong>Skewbald, an AI agent</strong>, not a person." in top
+    assert "builds and runs Calotype" in top
+    assert "21 November 2026" in top  # the day its facts were checked
+    assert 'id="sources"' in main and 'href="/guides"' in top
+
+
+@pytest.mark.parametrize("page", GUIDES, ids=GUIDE_IDS)
+def test_guide_is_linked_from_an_existing_page_and_tags_its_links(site, page):
+    from calotype.storage import REF_TAG
+
+    slug = page.path.rsplit("/", 1)[1]
+    assert f'href="{page.path}"' in main_of(site.get(GUIDE_LINKED_FROM[slug]).text)
+    tag = f"guide-{slug}"
+    assert REF_TAG.match(tag)
+    doc = site.get(page.path).text
+    # The link or address that leads to a key carries the guide's tag, and no other guide's.
+    assert f"?ref={tag}" in doc
+    assert set(re.findall(r"\?ref=([a-z0-9-]+)", main_of(doc))) == {tag}
+
+
+@pytest.mark.parametrize("page", GUIDES, ids=GUIDE_IDS)
+def test_guide_length_and_plain_words(site, page):
+    main = main_of(site.get(page.path).text)
+    prose = re.sub(r"<pre>.*?</pre>", " ", main, flags=re.DOTALL)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", prose))
+    assert 900 <= len(text.split()) <= 1800, len(text.split())
+    for word in ("best", "fastest", "leading", "world-class", "unbeatable", "blazing", "seamless", "effortless",
+                 "revolutionary", "powerful"):
+        assert re.search(rf"\b{word}\b", text.lower()) is None, word
+
+
+@pytest.mark.parametrize("page", GUIDES, ids=GUIDE_IDS)
+def test_guide_prices_and_parameters_match_the_code(site, page, settings):
+    from calotype import params
+
+    doc = site.get(page.path).text
+    text = html.unescape(re.sub(r"<[^>]+>", " ", main_of(doc)))
+    plans = settings.plans
+    prices = {p.price_usd_cents // 100 for p in plans.values() if p.price_usd_cents}
+    assert {int(n) for n in re.findall(r"\$(\d+)", text)} <= prices
+    for name in ("starter", "pro"):
+        plan = plans[name]
+        for quota in re.findall(rf"\${plan.price_usd_cents // 100} (?:a month )?for ([\d,]+)", text):
+            assert quota == f"{plan.monthly_quota:,}"
+    if "screenshots a month" in text:
+        assert f"{plans['free'].monthly_quota} screenshots a month" in text
+    # Calotype requests in the examples use only parameters the API takes, and no real key.
+    for block in re.findall(r"<pre><code>(.*?)</code></pre>", doc, re.DOTALL):
+        if "/v1/screenshot" in block:
+            names = set(re.findall(r"-d ([a-z_]+)=", block))
+            assert names and names <= set(params.ScreenshotParams.model_fields), names
+    assert re.search(r"cal_[A-Za-z0-9]{8,}", doc) is None
+
+
+@pytest.mark.parametrize("page", GUIDES, ids=GUIDE_IDS)
+def test_guide_code_samples_parse(site, page):
+    import json
+
+    doc = site.get(page.path).text
+    for source in code_blocks(doc, "python"):
+        compile(source, page.path, "exec")
+    for source in code_blocks(doc, "json"):
+        assert "mcpServers" in json.loads(source)
+    # Every code block is one of the kinds checked above or a shell or prompt example.
+    assert set(re.findall(r'<code class="([^"]+)">', doc)) <= {"language-python", "language-json"}
+
+
+def test_guides_state_what_the_code_does():
+    """Facts the guides give about Calotype, checked against the modules they describe."""
+    from calotype import capture, egress, params, ssrf
+
+    ssrf_guide = page_text("/guides/headless-browser-ssrf", paid_open=True)
+    assert f"at most {ssrf.MAX_URL_LENGTH:,} characters" in ssrf_guide
+    assert sorted(ssrf.ALLOWED_LOW_PORTS) == [80, 443] and "Ports 80, 443, and 1024 and up" in ssrf_guide
+    for name in ("localhost", "metadata.google.internal"):
+        assert name in ssrf.BLOCKED_HOSTNAMES and f"<code>{name}</code>" in ssrf_guide
+    for suffix in (".internal", ".local", ".lan", ".corp"):
+        assert suffix in ssrf.BLOCKED_HOST_SUFFIXES and f"<code>{suffix}</code>" in ssrf_guide
+    assert "--disable-quic" in capture.CHROMIUM_ARGS and "--dns-prefetch-disable" in capture.CHROMIUM_ARGS
+    assert "<-loopback>" in open(capture.__file__).read() and "&lt;-loopback&gt;" in ssrf_guide
+    assert "Connection: close" in open(egress.__file__).read() and "Connection: close" in ssrf_guide
+    assert "At most 50 MB downloaded and 30 seconds in total" in ssrf_guide
+    playwright_guide = page_text("/guides/playwright-python-screenshots", paid_open=True)
+    assert f"<code>delay_ms</code> (up to {params.MAX_DELAY_MS:,})" in playwright_guide
+    assert f"cut off at {params.MAX_FULL_PAGE_HEIGHT:,} CSS pixels" in playwright_guide
+    # The Dockerfile example names the same Playwright version as Calotype's own image.
+    dockerfile = (SITE_DIR.parent / "Dockerfile").read_text()
+    tag = re.search(r"playwright/python:(v[\d.]+-noble)", dockerfile).group(1)
+    assert f"FROM mcr.microsoft.com/playwright/python:{tag}" in playwright_guide

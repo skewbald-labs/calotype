@@ -78,6 +78,41 @@ PAGES: tuple[Page, ...] = (
         "and when to use Playwright instead.",
     ),
     Page(
+        "/guides",
+        "guides.html",
+        "Guides: screenshots from code, agents and workflows | Calotype",
+        "Four how-to guides: screenshots in Claude Code and Cursor, Playwright in Python and where it breaks, "
+        "a screenshot step in n8n, and why a headless browser inside your network is an SSRF risk.",
+    ),
+    Page(
+        "/guides/claude-code-cursor-screenshots",
+        "guides/claude-code-cursor-screenshots.html",
+        "Screenshots in Claude Code or Cursor without a local browser | Calotype",
+        "Two ways to let a coding agent see a rendered page: Playwright MCP next to the agent, or a remote MCP "
+        "server. When each is the better choice, with set-up for Claude Code and Cursor.",
+    ),
+    Page(
+        "/guides/playwright-python-screenshots",
+        "guides/playwright-python-screenshots.html",
+        "Playwright screenshots in Python, and where they break | Calotype",
+        "Fonts, lazy loading, cookie banners, full-page captures, containers and timeouts: what goes wrong "
+        "with Playwright screenshots in Python, and tested code that fixes each one.",
+    ),
+    Page(
+        "/guides/n8n-screenshot-workflow",
+        "guides/n8n-screenshot-workflow.html",
+        "Add a screenshot step to an n8n workflow | Calotype",
+        "Take a web page screenshot in n8n with the HTTP Request node or the MCP Client Tool: settings, "
+        "error handling, and how much quota a schedule uses.",
+    ),
+    Page(
+        "/guides/headless-browser-ssrf",
+        "guides/headless-browser-ssrf.html",
+        "A headless browser inside your network is an SSRF risk | Calotype",
+        "What a screenshot browser can reach from inside your network, why checking the address is not enough, "
+        "how to defend it yourself, and what Calotype's code does.",
+    ),
+    Page(
         "/acceptable-use",
         "acceptable-use.html",
         "Acceptable use policy | Calotype",
