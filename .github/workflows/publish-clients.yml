@@ -1,0 +1,141 @@
+# Publishes one client package from clients/ to npm or PyPI.
+#
+# It runs only when someone starts it by hand (Actions > Publish clients >
+# Run workflow) and types the version to confirm. It never runs on a push or a tag.
+#
+# No long-lived registry token is needed once each package has a trusted
+# publisher that names this file: GitHub's OIDC token is exchanged for a
+# short-lived one. The one-time setup on npmjs.com and pypi.org, and the
+# exception for the first npm publish, are in clients/PUBLISHING.md.
+#
+# Do not rename this file: the trusted publishers are bound to "publish-clients.yml".
+
+name: Publish clients
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Which package to publish
+        required: true
+        type: choice
+        options:
+          - calotype-mcp (npm)
+          - n8n-nodes-calotype (npm)
+          - calotype (PyPI)
+      version:
+        description: The version in the package's own files, typed again to confirm (for example 0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-clients-${{ inputs.package }}
+  cancel-in-progress: false
+
+jobs:
+  npm:
+    name: Publish ${{ inputs.package }}
+    if: endsWith(inputs.package, '(npm)')
+    runs-on: ubuntu-latest # trusted publishing needs a GitHub-hosted runner
+    environment: npm
+    permissions:
+      id-token: write # the OIDC token for trusted publishing and provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ startsWith(inputs.package, 'n8n') && 'clients/n8n' || 'clients/npm' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24' # trusted publishing needs Node 22.14+ and npm 11.5.1+
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Check the version typed matches the package
+        env:
+          TYPED: ${{ inputs.version }}
+        run: |
+          actual=$(node -p "require('./package.json').version")
+          if [ "$actual" != "$TYPED" ]; then
+            echo "::error::package.json says $actual, but $TYPED was typed. Nothing was published."
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Publish calotype-mcp
+        if: startsWith(inputs.package, 'calotype-mcp')
+        run: npm publish --access public
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          # Empty unless the NPM_TOKEN secret is set for a first publish (clients/PUBLISHING.md).
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish n8n-nodes-calotype
+        if: startsWith(inputs.package, 'n8n')
+        # In GitHub Actions, `n8n-node release` lints, builds and runs `npm publish` with provenance.
+        run: npm run release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  pypi-build:
+    name: Build calotype for PyPI
+    if: endsWith(inputs.package, '(PyPI)')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/python
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Check the version typed matches the package
+        env:
+          TYPED: ${{ inputs.version }}
+        run: |
+          actual=$(python -c "exec(open('src/calotype/_version.py').read()); print(__version__)")
+          if [ "$actual" != "$TYPED" ]; then
+            echo "::error::_version.py says $actual, but $TYPED was typed. Nothing was published."
+            exit 1
+          fi
+
+      - name: Build and test
+        run: |
+          python -m pip install build pytest
+          python -m build
+          python -m pip install dist/*.whl
+          python -m pytest
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: calotype-python-dist
+          path: clients/python/dist/
+          if-no-files-found: error
+
+  pypi-publish:
+    name: Publish calotype to PyPI
+    needs: pypi-build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # the OIDC token for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: calotype-python-dist
+          path: dist/
+
+      # Uploads with a short-lived token from PyPI and attaches attestations. No password or API token.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

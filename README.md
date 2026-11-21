@@ -121,6 +121,16 @@ n8n's MCP Client Tool works with the streamable HTTP transport and a Bearer Auth
 - Coming from another screenshot API, or deciding against Playwright: [calotype.dev/switch](https://calotype.dev/switch).
 - Regenerate the one-click links above with `python -m calotype.install_links`.
 
+## Clients
+
+Three thin clients for the hosted API are in this repository, under `clients/`. None is published to a registry yet; each has its own README, tests and licence.
+
+- [`clients/npm`](clients/npm): `calotype-mcp`, a local MCP server over stdio for Node.js, for agents that can only start a command. It lists the same `screenshot` tool as the hosted server and forwards each call to the HTTP API.
+- [`clients/python`](clients/python): `calotype`, a typed Python client with no dependencies: `Calotype(key).screenshot(url)` returns the image bytes.
+- [`clients/n8n`](clients/n8n): `n8n-nodes-calotype`, an n8n community node with one operation, Take Screenshot, that returns the image as a file.
+
+How they will be published: [`clients/PUBLISHING.md`](clients/PUBLISHING.md).
+
 ## What's in here
 
 The whole service: a FastAPI app with a Playwright/Chromium renderer, an address policy that refuses private, loopback and cloud-metadata addresses on every request, redirect and sub-request (`calotype/ssrf.py`), API keys stored only as SHA-256 hashes, monthly quotas, Stripe billing, the remote MCP server, the public site, and deploy scripts for Cloud Run and Firestore. `calotype/README.md` covers running, testing and deploying it.
