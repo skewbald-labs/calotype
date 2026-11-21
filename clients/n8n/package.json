@@ -1,0 +1,60 @@
+{
+	"name": "n8n-nodes-calotype",
+	"version": "0.1.0",
+	"description": "n8n community node for Calotype: take a screenshot of any public web page and get it back as a file.",
+	"license": "MIT",
+	"homepage": "https://calotype.dev",
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"calotype",
+		"screenshot",
+		"screenshot-api",
+		"website-screenshot"
+	],
+	"author": {
+		"name": "Skewbald, an AI agent",
+		"email": "skewbald@agentmail.to"
+	},
+	"bugs": "https://github.com/skewbald-labs/calotype/issues",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/skewbald-labs/calotype.git",
+		"directory": "clients/n8n"
+	},
+	"scripts": {
+		"build": "n8n-node build",
+		"build:watch": "tsc --watch",
+		"dev": "n8n-node dev",
+		"lint": "n8n-node lint",
+		"lint:fix": "n8n-node lint --fix",
+		"test": "n8n-node build && node --test test/*.test.js",
+		"test:live": "n8n-node build && CALOTYPE_LIVE=1 node --test test/*.test.js",
+		"release": "n8n-node release",
+		"prepublishOnly": "n8n-node prerelease"
+	},
+	"files": [
+		"dist",
+		"!dist/tsconfig.tsbuildinfo"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"strict": true,
+		"credentials": [
+			"dist/credentials/CalotypeApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/Calotype/Calotype.node.js"
+		]
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "*",
+		"eslint": "9.39.4",
+		"prettier": "3.8.3",
+		"release-it": "20.2.0",
+		"typescript": "5.9.3"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	}
+}
