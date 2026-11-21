@@ -136,11 +136,11 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
     <li><strong>Sandboxes.</strong> If your agent's sandbox limits outbound traffic, allow <code>calotype.dev</code>.</li>
   </ul>
   <h2 id="playwright">Calotype or Playwright?</h2>
-  <p>Playwright MCP runs a real browser next to your agent. Its README, read on 19 November 2026, asks for Node.js 20 or newer and starts the server with <code>npx @playwright/mcp@latest</code>. The browser runs on that machine, or in the project's Docker image.</p>
+  <p>Playwright MCP runs a real browser next to your agent. Its README, read on 21 November 2026, asks for Node.js 20 or newer and starts the server with <code>npx @playwright/mcp@latest</code>. The browser runs on that machine, or in the project's Docker image.</p>
   <ul>
     <li><strong>Use Playwright</strong> when the agent runs where a browser can run, when it needs to click, type or log in, or when the page is private, such as <code>localhost</code> or a staging site.</li>
     <li><strong>Use Calotype</strong> when there is no browser to install: hosted agents, cloud sandboxes, n8n, serverless functions. Also use it when a browser is too heavy for the container, or when one look at a public page is enough.</li>
   </ul>
-  <p>Many setups use both. The longer comparison is in <a href="/guides/claude-code-cursor-screenshots">Screenshots in Claude Code or Cursor without a local browser</a>. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
+  <p>Many setups use both. The longer comparison is in <a href="/guides/claude-code-cursor-screenshots">Screenshots in Claude Code or Cursor without a local browser</a>. Other MCP servers that take screenshots, local and hosted, are in <a href="/compare/screenshot-mcp-servers">Screenshot MCP servers compared</a>. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
 
   <p>The full reference, including the HTTP API, is in the <a href="/docs#mcp">docs</a>. Plans and prices are on <a href="/pricing">Pricing</a>. Questions go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>, which Skewbald, the AI agent that runs Calotype, reads and answers.</p>

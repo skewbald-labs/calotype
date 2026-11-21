@@ -450,7 +450,7 @@ SWITCH_SOURCES = (
     "https://docs.allscreenshots.com/api-reference/screenshots",
     "https://github.com/microsoft/playwright-mcp",
 )
-SWITCH_READ_ON = "19 November 2026"
+SWITCH_READ_ON = "21 November 2026"
 
 
 def test_switch_page_maps_every_parameter_the_code_takes(site):
@@ -781,3 +781,262 @@ def test_guides_state_what_the_code_does():
     dockerfile = (SITE_DIR.parent / "Dockerfile").read_text()
     tag = re.search(r"playwright/python:(v[\d.]+-noble)", dockerfile).group(1)
     assert f"FROM mcr.microsoft.com/playwright/python:{tag}" in playwright_guide
+
+
+# --- one page per alternative, and the MCP comparison (running plan H8) -----------------------
+
+SWITCH_PAGES = [p for p in PAGES if p.path.startswith("/switch/")]
+SWITCH_IDS = [p.path.rsplit("/", 1)[1] for p in SWITCH_PAGES]
+API_SWITCH_PAGES = [p for p in SWITCH_PAGES if not p.path.endswith("/playwright-mcp")]
+API_SWITCH_IDS = [p.path.rsplit("/", 1)[1] for p in API_SWITCH_PAGES]
+COMPARE_PATH = "/compare/screenshot-mcp-servers"
+H8_PAGES = SWITCH_PAGES + [p for p in PAGES if p.path == COMPARE_PATH]
+H8_IDS = [p.path for p in H8_PAGES]
+H8_READ_ON = "21 November 2026"
+# The pages each one's facts about the other side were read from, on the date the page states.
+H8_SOURCES = {
+    "/switch/screenshotone": (
+        "https://screenshotone.com/pricing/",
+        "https://screenshotone.com/docs/options/",
+        "https://screenshotone.com/docs/mcp/",
+    ),
+    "/switch/urlbox": ("https://urlbox.com/pricing", "https://urlbox.com/docs/options", "https://urlbox.com/docs/agents"),
+    "/switch/screenshotapi-net": (
+        "https://screenshotapi.net/pricing",
+        "https://screenshotapi.net/docs/getStarted",
+        "https://screenshotapi.net/integrations/mcp-server",
+    ),
+    "/switch/allscreenshots": (
+        "https://allscreenshots.com/pricing",
+        "https://docs.allscreenshots.com/api-reference/screenshots",
+        "https://docs.allscreenshots.com/tools/mcp",
+    ),
+    "/switch/apiflash": ("https://apiflash.com/", "https://apiflash.com/documentation"),
+    "/switch/playwright-mcp": ("https://github.com/microsoft/playwright-mcp",),
+    COMPARE_PATH: (
+        "https://github.com/microsoft/playwright-mcp",
+        "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+        "https://github.com/just-every/mcp-screenshot-website-fast",
+        "https://screenshotone.com/docs/mcp/",
+        "https://github.com/screenshotone/mcp",
+        "https://urlbox.com/docs/agents",
+        "https://docs.allscreenshots.com/tools/mcp",
+        "https://screenshotapi.net/integrations/mcp-server",
+    ),
+}
+# The arguments of the hosted MCP server's one tool (remote_mcp.py), a subset of the API's parameters.
+MCP_TOOL_ARGUMENTS = {"url", "full_page", "width", "height", "format", "dark_mode", "block_ads"}
+
+
+def h8_ref_tag(path: str) -> str:
+    return "compare-mcp" if path == COMPARE_PATH else "switch-" + path.rsplit("/", 1)[1]
+
+
+def section(document: str, start: str, end: str) -> str:
+    return document[document.index(f'id="{start}"'):document.index(f'id="{end}"')]
+
+
+def calotype_request(example: str) -> dict:
+    """The parameters of the Calotype request in a page's before-and-after example."""
+    import json
+    from urllib.parse import parse_qsl
+
+    blocks = [html.unescape(re.sub(r"<[^>]+>", "", b)) for b in re.findall(r"<pre><code>(.*?)</code></pre>", example, re.DOTALL)]
+    (block,) = [b for b in blocks if "calotype.dev/v1/screenshot" in b]
+    assert "Bearer cal_your_key" in block
+    query = re.search(r"/v1/screenshot\?([^\"]+)\"", block)
+    if query:
+        return dict(parse_qsl(query.group(1), strict_parsing=True))
+    return json.loads(re.search(r"-d '(\{.*?\})'", block).group(1))
+
+
+def test_there_is_a_page_per_alternative_and_the_overview_links_each(site):
+    assert sorted(SWITCH_IDS) == [
+        "allscreenshots", "apiflash", "playwright-mcp", "screenshotapi-net", "screenshotone", "urlbox",
+    ]
+    overview = main_of(site.get("/switch").text)
+    for page in H8_PAGES:
+        assert f'href="{page.path}"' in overview, page.path
+    # The anchors other pages and outside links point at are still on the overview.
+    for anchor in ("fit", "prices", "params", "example", "differences", "more", "playwright", "feedback"):
+        assert f'id="{anchor}"' in overview, anchor
+    # The comparison is linked from the guides index and the agents page.
+    for path in ("/guides", "/agents"):
+        assert f'href="{COMPARE_PATH}"' in main_of(site.get(path).text), path
+
+
+@pytest.mark.parametrize("page", H8_PAGES, ids=H8_IDS)
+def test_h8_page_serves_with_title_description_and_one_h1(site, page):
+    r = site.get(page.path)
+    assert r.status_code == 200
+    doc = r.text
+    assert f"<title>{html.escape(page.title)}</title>" in doc
+    assert page.title.endswith(" | Calotype")
+    assert 50 <= len(meta(doc, "name", "description")) <= 200
+    assert len(re.findall(r"<h1\b", doc)) == 1
+    heading = html.unescape(re.search(r"<h1>(.*?)</h1>", doc).group(1))
+    assert heading == page.title.removesuffix(" | Calotype")
+    assert f"<loc>{canonical_url(page.path)}</loc>" in site.get("/sitemap.xml").text
+    assert (SITE_DIR / "pages" / page.source).parent.name == page.path.split("/")[1]
+
+
+@pytest.mark.parametrize("page", H8_PAGES, ids=H8_IDS)
+def test_h8_page_discloses_its_author_and_dates_its_sources(site, page):
+    main = main_of(site.get(page.path).text)
+    top = main[:main.index("<h2")]
+    assert "Written by <strong>Skewbald, an AI agent</strong>, not a person." in top
+    assert "builds and runs Calotype" in top and "weigh the Calotype parts" in top
+    assert H8_READ_ON in top
+    if page.path == COMPARE_PATH:
+        assert "<strong>The author runs one of the entries.</strong>" in top
+        assert 'href="/guides"' in top
+    else:
+        assert 'href="/switch"' in top
+    sources = main[main.index('id="sources"'):]
+    assert f"Read on {H8_READ_ON}:" in sources
+    for url in H8_SOURCES[page.path]:
+        assert f'href="{url}"' in sources, url
+    # No date but the day the pages were read.
+    assert set(re.findall(r"\d{1,2} November 2026", main)) == {H8_READ_ON}
+
+
+@pytest.mark.parametrize("page", H8_PAGES, ids=H8_IDS)
+def test_h8_page_tags_its_one_link_to_a_key(site, page):
+    from calotype.storage import REF_TAG
+
+    tag = h8_ref_tag(page.path)
+    assert REF_TAG.match(tag)
+    main = main_of(site.get(page.path).text)
+    # One tagged link, to a page with the key button.
+    assert re.findall(r'href="(/[^"]*)\?ref=([a-z0-9-]+)(#key)?"', main) in ([("/", tag, "#key")], [("/agents", tag, "")])
+    assert main.count("?ref=") == 1
+
+
+@pytest.mark.parametrize("page", H8_PAGES, ids=H8_IDS)
+def test_h8_page_states_calotypes_prices_from_plans_json(site, page, settings):
+    text = html.unescape(re.sub(r"<[^>]+>", " ", main_of(site.get(page.path).text)))
+    free, starter, pro = (settings.plans[name] for name in ("free", "starter", "pro"))
+    starter_usd, pro_usd = starter.price_usd_cents // 100, pro.price_usd_cents // 100
+    if page.path == COMPARE_PATH:
+        assert f"{free.monthly_quota} screenshots a month free, then ${starter_usd} a month for {starter.monthly_quota:,}" in text
+        assert f"${pro_usd} for {pro.monthly_quota:,}" in text
+        return
+    assert f"${starter_usd} a month, {starter.monthly_quota:,} screenshots" in text
+    assert f"${starter.price_usd_cents / starter.monthly_quota * 10:.2f}" in text  # per 1,000
+    assert f"${pro_usd}" in text and f"{pro.monthly_quota:,}" in text
+    assert f"${pro.price_usd_cents / pro.monthly_quota * 10:.2f}" in text
+    assert f"{free.monthly_quota} a month, no account" in text
+    assert "quota_exceeded" in text or page.path.endswith("/playwright-mcp")
+    # "$19 for" and "$49 for" are only ever said of Calotype's plans on these pages, with the plan's quota.
+    for plan in (starter, pro):
+        for quota in re.findall(rf"\${plan.price_usd_cents // 100} (?:a month )?for ([\d,]*\d)", text):
+            assert quota == f"{plan.monthly_quota:,}", quota
+
+
+@pytest.mark.parametrize("page", API_SWITCH_PAGES, ids=API_SWITCH_IDS)
+def test_switch_page_maps_and_converts_only_what_the_code_takes(site, page):
+    from calotype import params
+
+    doc = site.get(page.path).text
+    for anchor in ("prices", "params", "example", "they-do-more", "calotype-does", "stay", "start", "sources"):
+        assert f'id="{anchor}"' in doc and f'href="#{anchor}"' in doc, anchor
+    fields = set(params.ScreenshotParams.model_fields)
+    # The mapping table's Calotype column names every parameter, and nothing the API refuses.
+    table = section(doc, "params", "example")
+    calotype_cells = re.findall(r"<tr><td>.*?</td><td>(.*?)</td>", table)
+    named = {name for cell in calotype_cells for name in re.findall(r"<code>([a-z_]+)</code>", cell)}
+    assert fields <= named, fields - named
+    assert named - fields <= {"access_key", "png", "jpeg", "webp", "jpg", "load", "domcontentloaded", "networkidle", "commit", "cal_"}
+    assert f"at most {params.MAX_DELAY_MS:,}" in table
+    assert f"{params.MIN_SIDE} to {params.MAX_WIDTH:,}" in table and f"{params.MIN_SIDE} to {params.MAX_HEIGHT:,}" in table
+    assert f"cuts a full page off at {params.MAX_FULL_PAGE_HEIGHT:,} CSS pixels" in table
+    # The converted request is one the API accepts.
+    request = calotype_request(section(doc, "example", "they-do-more"))
+    parsed = params.ScreenshotParams.model_validate(request)
+    assert parsed.check_combinations() is None
+    assert parsed.url.startswith("https://example.com")
+    assert len(request) >= 6, "the example converts more than the address"
+    assert re.search(r"cal_[A-Za-z0-9]{8,}", doc) is None
+    assert 'href="/switch#feedback"' in doc
+
+
+def test_playwright_page_covers_where_it_runs_and_uses_the_tools_own_arguments(site):
+    import json
+
+    from calotype import params
+
+    doc = site.get("/switch/playwright-mcp").text
+    for anchor in ("prices", "where", "private", "interaction", "params", "example", "they-do-more", "calotype-does",
+                   "stay", "sources"):
+        assert f'id="{anchor}"' in doc and f'href="#{anchor}"' in doc, anchor
+    assert "Node.js 20 or newer" in doc and "npx @playwright/mcp@latest" in doc
+    assert "localhost" in section(doc, "private", "interaction")
+    assert "usually the better tool" in main_of(doc)[:main_of(doc).index("<h2")]
+    assert "Apache-2.0" in doc and "Free" in section(doc, "prices", "where")
+    (call,) = code_blocks(doc, "json")
+    arguments = json.loads(call)
+    assert set(arguments) <= MCP_TOOL_ARGUMENTS
+    assert params.ScreenshotParams.model_validate(arguments).check_combinations() is None
+    table = section(doc, "params", "example")
+    calotype_cells = re.findall(r"<tr><td>.*?</td><td>(.*?)</td>", table)
+    named = {name for cell in calotype_cells for name in re.findall(r"<code>([a-z_]+)</code>", cell)}
+    assert MCP_TOOL_ARGUMENTS <= named | {"block_ads"} and named <= set(params.ScreenshotParams.model_fields) | {
+        "screenshot", "jpeg", "png", "webp"}
+    assert f"One tool with {['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'][len(MCP_TOOL_ARGUMENTS)]} arguments" in doc
+    assert re.search(r"cal_[A-Za-z0-9]{8,}", doc) is None and "cal_your_key" in doc
+
+
+def test_mcp_tool_arguments_in_the_tests_match_the_server():
+    import inspect
+
+    from calotype.remote_mcp import RemoteMCP
+
+    signature = inspect.signature(RemoteMCP.screenshot)
+    assert set(signature.parameters) - {"self", "ctx"} == MCP_TOOL_ARGUMENTS
+
+
+def test_comparison_names_every_server_and_says_where_others_are_ahead(site):
+    doc = site.get(COMPARE_PATH).text
+    for anchor in ("short", "where", "returns", "install", "notes", "ahead", "calotype", "method", "sources"):
+        assert f'id="{anchor}"' in doc and f'href="#{anchor}"' in doc, anchor
+    for table in (section(doc, "where", "returns"), section(doc, "returns", "install")):
+        for name in ("Playwright MCP", "Chrome DevTools MCP", "@just-every/mcp-screenshot-website-fast", "ScreenshotOne",
+                     "Urlbox", "Allscreenshots", "ScreenshotAPI.net", "Calotype"):
+            assert name in table, name
+        assert table.count("<tr><td>") >= 8
+    where = section(doc, "where", "returns")
+    assert "local package" in where and "hosted" in where  # both of ScreenshotOne's servers
+    for column in ("Local or remote", "Sign-in", "Price and free use", "Licence"):
+        assert f"<th>{column}</th>" in where, column
+    for column in ("What comes back to the model", "Localhost and private pages", "Interaction"):
+        assert f"<th>{column}</th>" in doc, column
+    install = section(doc, "install", "notes")
+    for line in ("npx @playwright/mcp@latest", "npx -y chrome-devtools-mcp@latest", "@screenshotone/mcp",
+                 "https://mcp.screenshotone.com", "https://api.urlbox.com/mcp", "https://mcp.allscreenshots.com/mcp/v1",
+                 "npx -y @screenshotapinet/mcp", "npx -y @just-every/mcp-screenshot-website-fast",
+                 "https://calotype.dev/mcp"):
+        assert line in install, line
+    # It says where the others do more, and does not claim the three hosted OAuth servers are missing.
+    ahead = section(doc, "ahead", "calotype")
+    for word in ("localhost", "OAuth", "free", "PDF", "Markdown"):
+        assert word in ahead, word
+    assert "No OAuth" in where and "Nothing was installed or run" in doc
+    assert re.search(r"cal_[A-Za-z0-9]{8,}", doc) is None
+
+
+@pytest.mark.parametrize("page", H8_PAGES, ids=H8_IDS)
+def test_h8_page_stays_plain_and_claims_no_first_place(site, page):
+    main = main_of(site.get(page.path).text)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", main)).lower()
+    for word in ("best", "fastest", "leading", "world-class", "unbeatable", "blazing", "seamless", "effortless",
+                 "revolutionary", "powerful", "worse", "terrible", "cheapest", "lowest price", "no remote mcp"):
+        assert re.search(rf"\b{word}\b", text) is None, word
+    # What the other side does better comes before what Calotype does.
+    if page.path != COMPARE_PATH:
+        assert main.index('id="they-do-more"') < main.index('id="calotype-does"') < main.index('id="stay"')
+        more = section(main, "they-do-more", "calotype-does")
+        does = section(main, "calotype-does", "stay")
+        assert more.count("<li>") > does.count("<li>")
+    # No images, forms or scripts of its own: nothing of the other sites is shown.
+    assert "<img" not in main and "<form" not in main and "<script" not in main
+

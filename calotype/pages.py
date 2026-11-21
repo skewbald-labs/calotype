@@ -74,8 +74,57 @@ PAGES: tuple[Page, ...] = (
         "switch.html",
         "Switching to Calotype from another screenshot API | Calotype",
         "Parameter names mapped from ScreenshotOne, Urlbox, ApiFlash, ScreenshotAPI.net and Allscreenshots, "
-        "prices per 1,000 as read on 19 November 2026, what other services do that Calotype does not, "
+        "prices per 1,000 as read on 21 November 2026, what other services do that Calotype does not, "
         "and when to use Playwright instead.",
+    ),
+    Page(
+        "/switch/screenshotone",
+        "switch/screenshotone.html",
+        "Switching from ScreenshotOne to Calotype | Calotype",
+        "ScreenshotOne and Calotype side by side: prices per 1,000 as read on 21 November 2026, parameter names "
+        "mapped, one request before and after, and when to stay with ScreenshotOne.",
+    ),
+    Page(
+        "/switch/urlbox",
+        "switch/urlbox.html",
+        "Switching from Urlbox to Calotype | Calotype",
+        "Urlbox and Calotype side by side: Lo-Fi and Hi-Fi prices as read on 21 November 2026, render options "
+        "mapped to Calotype's parameters, one request before and after, and when to stay with Urlbox.",
+    ),
+    Page(
+        "/switch/screenshotapi-net",
+        "switch/screenshotapi-net.html",
+        "Switching from ScreenshotAPI.net to Calotype | Calotype",
+        "ScreenshotAPI.net and Calotype side by side: prices at each plan as read on 21 November 2026, where "
+        "ScreenshotAPI.net costs less, parameter names mapped, and one request before and after.",
+    ),
+    Page(
+        "/switch/allscreenshots",
+        "switch/allscreenshots.html",
+        "Switching from Allscreenshots to Calotype | Calotype",
+        "Allscreenshots and Calotype side by side: prices as read on 21 November 2026, camel-case options mapped "
+        "to Calotype's parameters, defaults that differ, and when to stay with Allscreenshots.",
+    ),
+    Page(
+        "/switch/apiflash",
+        "switch/apiflash.html",
+        "Switching from ApiFlash to Calotype | Calotype",
+        "ApiFlash and Calotype side by side: prices as read on 21 November 2026, parameter names mapped, the "
+        "network-wait default that differs, and when ApiFlash is the smaller bill.",
+    ),
+    Page(
+        "/switch/playwright-mcp",
+        "switch/playwright-mcp.html",
+        "Playwright MCP or Calotype | Calotype",
+        "Playwright MCP is free and runs a browser next to your agent; Calotype is a remote screenshot tool. "
+        "Where each runs, what each installs, private pages, interaction, and when to keep Playwright MCP.",
+    ),
+    Page(
+        "/compare/screenshot-mcp-servers",
+        "compare/screenshot-mcp-servers.html",
+        "Screenshot MCP servers compared | Calotype",
+        "Playwright MCP, Chrome DevTools MCP, ScreenshotOne, Urlbox, Allscreenshots, ScreenshotAPI.net and "
+        "Calotype: local or remote, sign-in, what the model gets and price. By the agent that runs Calotype.",
     ),
     Page(
         "/guides",
