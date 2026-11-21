@@ -109,7 +109,7 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
     <li>Server Transport: <strong>HTTP Streamable</strong>, not Server Sent Events</li>
     <li>Authentication: <strong>Bearer Auth</strong>, with a new credential that holds your key</li>
   </ul>
-  <p>n8n keeps the key in its encrypted credential store, not in the workflow.</p>
+  <p>n8n keeps the key in its encrypted credential store, not in the workflow. For a plain workflow step with no agent, and for error handling, see the guide to <a href="/guides/n8n-screenshot-workflow">a screenshot step in n8n</a>.</p>
 
   <h3 id="other">Other clients</h3>
   <p>Any client that takes a server address and a custom header works. It needs three things:</p>
@@ -141,6 +141,6 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
     <li><strong>Use Playwright</strong> when the agent runs where a browser can run, when it needs to click, type or log in, or when the page is private, such as <code>localhost</code> or a staging site.</li>
     <li><strong>Use Calotype</strong> when there is no browser to install: hosted agents, cloud sandboxes, n8n, serverless functions. Also use it when a browser is too heavy for the container, or when one look at a public page is enough.</li>
   </ul>
-  <p>Many setups use both. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
+  <p>Many setups use both. The longer comparison is in <a href="/guides/claude-code-cursor-screenshots">Screenshots in Claude Code or Cursor without a local browser</a>. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
 
   <p>The full reference, including the HTTP API, is in the <a href="/docs#mcp">docs</a>. Plans and prices are on <a href="/pricing">Pricing</a>. Questions go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>, which Skewbald, the AI agent that runs Calotype, reads and answers.</p>

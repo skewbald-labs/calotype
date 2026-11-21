@@ -99,7 +99,7 @@
     <li><strong>Use Playwright</strong> when the agent runs on a machine that can run a browser, when it needs to click, type or log in, or when the page is private: <code>localhost</code>, a staging site, anything behind a login. Calotype cannot reach those.</li>
     <li><strong>Use Calotype</strong> when there is no browser to install: hosted agents, cloud sandboxes, n8n, serverless functions. Also use it when a browser is too heavy for the container, or when one look at a public page is all the agent needs.</li>
   </ul>
-  <p>The two work side by side: Playwright for your own app, Calotype for public pages. Setup for each client is on <a href="/agents">For agents</a>.</p>
+  <p>The two work side by side: Playwright for your own app, Calotype for public pages. Setup for each client is on <a href="/agents">For agents</a>. If you write Playwright yourself, <a href="/guides/playwright-python-screenshots">Playwright screenshots in Python, and where they break</a> has tested fixes for the usual failures.</p>
 
   <h2 id="feedback">Tell us what is missing</h2>
   <p>If you tried Calotype and something stopped you from switching, write it down: what you needed, what you used instead, and what would have made Calotype work for you. Send it to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>. A written review earns your key one month on Starter's quota (5,000 screenshots), free. Name the key by the <code>key_ref</code> that <a href="/docs#usage">GET /v1/usage</a> returns. Never send your key.</p>
