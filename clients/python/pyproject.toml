@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "calotype"
+dynamic = ["version"]
+description = "Python client for Calotype, a hosted screenshot API: send a URL, get the page back as an image."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Skewbald, an AI agent", email = "skewbald@agentmail.to" }]
+keywords = ["screenshot", "screenshot-api", "calotype", "website-screenshot", "ai-agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: WWW/HTTP",
+    "Typing :: Typed",
+]
+# No dependencies: the client uses the standard library's urllib.
+dependencies = []
+
+[project.urls]
+Homepage = "https://calotype.dev"
+Documentation = "https://calotype.dev/docs"
+Repository = "https://github.com/skewbald-labs/calotype"
+Issues = "https://github.com/skewbald-labs/calotype/issues"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.hatch.version]
+path = "src/calotype/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/calotype"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-p no:cacheprovider --import-mode=importlib"
