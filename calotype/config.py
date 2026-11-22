@@ -85,6 +85,16 @@ class Settings:
     # (notices.py). Secret. Unset or under 32 characters: no address is stored
     # and no quota notice is queued. The sender job needs the same value.
     email_token_secret: str = field(default="", repr=False)
+    # OAuth sign-in on /mcp (oauth.py): signs client registrations and the consent
+    # form. Secret, at least 32 characters. Unset or shorter: OAuth is off and its
+    # discovery documents answer 404.
+    oauth_secret: str = field(default="", repr=False)
+    # OAuth client registrations per client IP per hour (in memory, per instance).
+    oauth_registrations_per_ip_per_hour: int = 20
+    # What a keyless MCP tools/call gets while OAuth is on: "challenge" (HTTP 401 with
+    # WWW-Authenticate, which makes OAuth clients sign in) or "result" (the tool error
+    # that says how to get a key, as before OAuth). With OAuth off it is always "result".
+    mcp_keyless_call: str = "challenge"
     plans: dict[str, Plan] = field(default_factory=dict)
     # Prepaid packs, from the plans file's "credit_packs". None: not loaded yet (see with_plans).
     credit_packs: dict[str, CreditPack] | None = None
@@ -122,6 +132,9 @@ class Settings:
             trusted_proxy_hops=_env_int("CALOTYPE_TRUSTED_PROXY_HOPS", 0),
             public_url=os.environ.get("CALOTYPE_PUBLIC_URL", "").strip().rstrip("/"),
             email_token_secret=os.environ.get("CALOTYPE_EMAIL_TOKEN_SECRET", "").strip(),
+            oauth_secret=os.environ.get("CALOTYPE_OAUTH_SECRET", "").strip(),
+            oauth_registrations_per_ip_per_hour=_env_int("CALOTYPE_OAUTH_REGISTRATIONS_PER_IP_PER_HOUR", 20),
+            mcp_keyless_call=os.environ.get("CALOTYPE_MCP_KEYLESS_CALL", "").strip().lower() or "challenge",
             plans=load_plans(plans_file),
             credit_packs=load_credit_packs(plans_file),
         )

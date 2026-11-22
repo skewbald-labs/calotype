@@ -45,6 +45,13 @@ The funnel (``funnel.py``) is counted the same way, per UTC day and per step
 called it without one, sent a wrong key, probed for OAuth, looked for a key
 page that does not exist, made a key, and took a key's first screenshot.
 Counts only: never a URL, a key, a user agent or an IP address.
+OAuth sign-in on ``/mcp`` (``oauth.py``) stores one short-lived record per
+authorization code (``OAuthCode``): the SHA-256 hash of the code (never the
+code), a hash of the client id, the redirect address, the PKCE challenge, the
+resource, and the API key sealed with a pad derived from the code, so the
+record alone gives no usable key. A code is taken once (``take_oauth_code``
+deletes it) and lives a minute; expired records are deleted whenever a new
+code is saved. Client registrations are not stored at all.
 
 The "contact ordinal" for the demand test is derived, not stored: it is the
 creation order of non-internal keys that have made at least one successful
@@ -58,6 +65,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -199,6 +207,24 @@ class FunnelDay:
 # The funnel's steps, in order. Each is a FunnelDay field and the name stored for it.
 FUNNEL_EVENTS = tuple(f.name for f in fields(FunnelDay) if f.name != "day")
 
+@dataclass(frozen=True)
+class OAuthCode:
+    """One OAuth authorization code, waiting to be exchanged for its token (``oauth.py``).
+
+    Single use and short-lived. Holds no usable secret: ``id`` is the SHA-256
+    of the code, and ``sealed_key`` is the API key XORed with a pad that only
+    the code itself yields.
+    """
+
+    id: str  # SHA-256 hex of the code
+    client_hash: str  # SHA-256 hex of the client id it was issued to
+    redirect_uri: str
+    code_challenge: str  # PKCE, S256
+    resource: str  # the RFC 8707 resource asked for, "" if none
+    sealed_key: str
+    expires_at: int  # Unix seconds
+    created_at: int = 0
+
 
 def hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
@@ -282,6 +308,8 @@ class Storage(Protocol):
     def try_days(self, days: list[str]) -> list[TryDay]: ...
     def record_funnel(self, day: str, event: str) -> None: ...
     def funnel_days(self, days: list[str]) -> list[FunnelDay]: ...
+    def save_oauth_code(self, code: OAuthCode) -> None: ...
+    def take_oauth_code(self, code_id: str, now: int | None = None) -> OAuthCode | None: ...
 
 
 SCHEMA = """
@@ -359,6 +387,17 @@ CREATE TABLE IF NOT EXISTS funnel (
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, event)
 );
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+    id TEXT PRIMARY KEY,
+    client_hash TEXT NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    sealed_key TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
 """
 
 # Columns added after the first release. ``init`` adds any that an older
@@ -374,6 +413,7 @@ CREATE INDEX IF NOT EXISTS credit_purchases_key ON credit_purchases (key_id);
 CREATE INDEX IF NOT EXISTS credit_purchases_challenge ON credit_purchases (challenge_id);
 CREATE INDEX IF NOT EXISTS api_keys_email ON api_keys (email);
 CREATE INDEX IF NOT EXISTS notices_key ON notices (key_id);
+CREATE INDEX IF NOT EXISTS oauth_codes_expiry ON oauth_codes (expires_at);
 """
 
 
@@ -851,6 +891,31 @@ class SQLiteStorage:
             if event in FUNNEL_EVENTS:  # a step since renamed or dropped is not shown
                 found.setdefault(day, {})[event] = int(count)
         return [FunnelDay(d, **found.get(d, {})) for d in days]
+    # --- OAuth authorization codes (oauth.py) ---------------------------------------
+
+    def save_oauth_code(self, code: OAuthCode) -> None:
+        """Store a new code, and delete every code that has expired."""
+        now = int(time.time())
+        with self._lock:
+            db = self._db()
+            db.execute("DELETE FROM oauth_codes WHERE expires_at < ?", (now,))
+            db.execute(
+                f"INSERT INTO oauth_codes ({_CODE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (code.id, code.client_hash, code.redirect_uri, code.code_challenge, code.resource,
+                 code.sealed_key, int(code.expires_at), int(code.created_at or now)),
+            )
+
+    def take_oauth_code(self, code_id: str, now: int | None = None) -> OAuthCode | None:
+        """Delete the code and return it, once. None if unknown, already taken or expired."""
+        now = int(time.time()) if now is None else now
+        with self._lock:
+            row = self._db().execute(
+                f"DELETE FROM oauth_codes WHERE id = ? RETURNING {_CODE_COLUMNS}", (code_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        code = OAuthCode(*row[:6], int(row[6]), int(row[7]))
+        return code if code.expires_at >= now else None
 
     def _tries_rendered_locked(self, day: str) -> int:
         row = self._db().execute("SELECT rendered FROM tries WHERE day = ?", (day,)).fetchone()
@@ -860,6 +925,8 @@ class SQLiteStorage:
         row = self._db().execute("SELECT count FROM usage WHERE key_id = ? AND month = ?", (key_id, month)).fetchone()
         return int(row[0]) if row else 0
 
+
+_CODE_COLUMNS = "id, client_hash, redirect_uri, code_challenge, resource, sealed_key, expires_at, created_at"
 
 _TRY_COLUMNS = "day, total, rendered, succeeded, failed, refused, limited, capped"
 

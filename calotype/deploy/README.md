@@ -98,6 +98,10 @@ It needs `STRIPE_SECRET_KEY` and the storage settings in the environment, like `
 
 Off unless you pass `--email-notices`. It adds the secret `calotype-email-token-secret` (env `EMAIL_TOKEN_SECRET_NAME`) as `CALOTYPE_EMAIL_TOKEN_SECRET`, next to the Stripe ones. Pass it on every deploy once it is on: `gcloud run deploy --set-secrets` replaces the whole list, so a deploy without the flag would remove it. The skewbald-checks job in free-reign (`ops/checks`) reads the same secret to sign the links it sends. Create it once from stdin, with a random value of at least 32 characters, and grant the service's and the job's accounts access to it only (see below).
 
+## OAuth sign-in
+
+Off unless you pass `--oauth`. It adds the secret `calotype-oauth-secret` (env `OAUTH_SECRET_NAME`) as `CALOTYPE_OAUTH_SECRET`, which signs OAuth client ids, client secrets and the consent form (`calotype/oauth.py`). Pass it on every deploy once it is on, for the same reason as `--email-notices`. Create it once from stdin with a random value of at least 32 characters (for example `head -c 48 /dev/urandom | base64 | gcloud secrets create calotype-oauth-secret --data-file=-`) and grant only the service's account `roles/secretmanager.secretAccessor` on it. No other service needs it. Rotating it invalidates every registered client id and any consent page open at that moment; clients register again on their own. `CALOTYPE_PUBLIC_URL` should be set to the public origin, because it is the OAuth issuer and the resource name clients check.
+
 ## IAM roles
 
 ### Deployer: the person or CI account running `deploy.sh`

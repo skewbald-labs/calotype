@@ -1,6 +1,6 @@
   <h1>Privacy notice</h1>
   <p class="lede">Calotype is built to know as little about you as it can. This page says exactly what it keeps, what it logs, and what it never stores.</p>
-  <p class="muted">Last changed 22 November 2026: prepaid packs, and daily counts of the steps toward a key.</p>
+  <p class="muted">Last changed 22 November 2026: <!--oauth-->sign-in with OAuth, <!--/oauth-->prepaid packs, and daily counts of the steps toward a key.</p>
 
   <h2 id="who">Who is responsible</h2>
   <p>Calotype is sold by Dostal Technology, a Texas company, and built and run by Skewbald, an AI agent. Questions about this notice, and requests about your data, go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
@@ -27,6 +27,7 @@
     <li>for paid keys only, the Stripe customer id and subscription id, which link the key to its subscription;</li>
     <li>for keys that bought a <a href="/docs#credits">prepaid pack</a>, the prepaid balance and one record per purchase: the pack, its size and price, the Stripe payment id, when it was paid, and when it was refunded if it was;</li>
     <li>only if you gave one, an email address for <a href="#quota-emails">quota emails</a>, and a record of each quota email queued for the key.</li>
+    <!--oauth--><li>for keys made or linked through <a href="#oauth">sign-in with OAuth</a>, the app's name as a tag, such as <code>ref:oauth-claude</code>.</li><!--/oauth-->
   </ul>
   <p>It also keeps the ids of the Stripe webhook events it has handled, so that a repeated event is not applied twice. Those ids say nothing about you.</p>
   <p>For the <a href="#tries">free tries</a>, it keeps one record per day (UTC) with counts only: how many tries there were, how many were rendered, and how many succeeded, failed, were refused, were over the hourly limit or came after the daily limit. No address, host, IP address or image.</p>
@@ -42,13 +43,25 @@
   <p><strong>How to remove it.</strong> Open the link at the end of any quota email; it removes the address at once. Or reply "stop" to the email, or call <code>DELETE /v1/keys/email</code> with the key, or write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
 
   <h2 id="ip">IP addresses</h2>
-  <p>To stop one person from making keys by the hundred, the server counts recent key requests per IP address. It counts <a href="#tries">free tries</a> per IP address the same way, to hold each address to its hourly limit. Those counts live in the server's memory only. An address is forgotten at most an hour after its last key request or try, and all of them are gone when the server restarts. Calotype never writes an IP address to its database, its logs or a file. Screenshot calls made with a key do not look at your IP address at all.</p>
+  <p>To stop one person from making keys by the hundred, the server counts recent key requests per IP address. It counts <a href="#tries">free tries</a> per IP address the same way, to hold each address to its hourly limit<!--oauth-->, and app registrations for <a href="#oauth">sign-in with OAuth</a><!--/oauth-->. Those counts live in the server's memory only. An address is forgotten at most an hour after its last key request or try, and all of them are gone when the server restarts. Calotype never writes an IP address to its database, its logs or a file. Screenshot calls made with a key do not look at your IP address at all.</p>
 
   <h2 id="tries">Free tries</h2>
   <p>The box on the home page takes a screenshot with no key. Calotype uses the address you paste to render that page once, sends the image back inside the answer page, and keeps neither the address nor the image. The answer page tells browsers not to cache it.</p>
   <p>What is kept: the day's counts described <a href="#stored">above</a>, and one log line per try, like a screenshot's, with the scheme and host of the page (such as <code>https://example.com</code>) and how the try ended. Your IP address is held in memory for at most an hour, as described above, and is not in the counts or the logs. The form sends the address in the body of the request, not in the request line.</p>
 
-  <h2 id="logs">What Calotype logs</h2>
+<!--oauth-->  <h2 id="oauth">Sign-in with OAuth</h2>
+  <p>Apps such as claude.ai and ChatGPT can connect to Calotype's MCP server by OAuth instead of with a key you copy. This is what that keeps:</p>
+  <ul>
+    <li><strong>The app's registration</strong> is not stored. Its name and return addresses travel inside the client id the app holds, signed by Calotype. Registrations are counted per IP address in memory, as described <a href="#ip">below</a>.</li>
+    <li><strong>An app named by a web address</strong> (a client metadata document) has that document fetched by Calotype, under the same address rules as a screenshot, and kept in the server's memory for five minutes.</li>
+    <li><strong>When you approve</strong>, a free key is made exactly as with the key button, under the same hourly limit, and tagged with the app's name. When you paste a key, Calotype checks it and, if it has no tag yet, tags it the same way. The tag names the app, not you.</li>
+    <li><strong>For about a minute</strong>, until the app collects it, Calotype stores one authorization code record: a hash of the code, a hash of the app's client id, the app's return address, the code challenge the app sent, and the key in a form that only the code can unlock. Collecting the code deletes the record. A code that is never collected expires after a minute and is deleted the next time any code is made.</li>
+    <li><strong>No cookie</strong> is set by the consent page.</li>
+    <li><strong>Logs</strong> name the app by its tag, how the sign-in ended and the key's internal number; never the key, the code or the return address.</li>
+  </ul>
+  <p>The app then holds the key and sends it with each screenshot, as any key holder does. To stop it, remove Calotype from the app. You never see a key made this way, so to have it revoked or its record deleted, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a> with the app's name and roughly when you approved; Calotype finds the key's number in its logs. Deletion then works as described <a href="#keeping">below</a>.</p>
+
+<!--/oauth-->  <h2 id="logs">What Calotype logs</h2>
   <p>Calotype writes one log line per request, to Google Cloud Logging, with: a random request id, the method and path (without the query string), the status, how long it took, the key's internal number, and for screenshots the scheme and host of the page, such as <code>https://example.com</code>. A screenshot line adds the image format, whether it was full-page, the image's size in bytes, the time taken, the page's HTTP status, how many of the page's requests were blocked, and whether the page hit the download limit. A free try logs a line of the same kind, with how the try ended and no key number. Billing events log the key's number, the plan and Stripe's ids.</p>
   <p>Calotype's logs never contain your key, the full address you captured, its path or query, your IP address, your email address or your request headers. Error messages are scrubbed of keys and full addresses before they are written.</p>
 

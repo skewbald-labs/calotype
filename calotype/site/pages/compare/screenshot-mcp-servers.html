@@ -22,7 +22,7 @@
   <ul>
     <li><strong>Your agent runs on your own machine and looks at your own app:</strong> Playwright MCP or Chrome DevTools MCP. Both are free, both reach <code>localhost</code>, and both can click and type. Chrome DevTools MCP adds the network log, the console and performance traces.</li>
     <li><strong>You want screenshots only, locally, sized for a model:</strong> <code>@just-every/mcp-screenshot-website-fast</code>, free, which cuts pages into 1072 by 1072 tiles.</li>
-    <li><strong>Your agent cannot run a browser, and your client signs in with OAuth:</strong> ScreenshotOne's, Urlbox's or Allscreenshots' hosted server. Each does much more than screenshots.</li>
+    <li><strong>Your agent cannot run a browser, and your client signs in with OAuth:</strong> ScreenshotOne's, Urlbox's or Allscreenshots' hosted server. Each does much more than screenshots.<!--oauth--> Calotype's also signs in with OAuth, with no account, and does only screenshots.<!--/oauth--></li>
     <li><strong>Your agent can run <code>npx</code> but you want the browser elsewhere:</strong> ScreenshotAPI.net's or ScreenshotOne's local server, with an API key.</li>
     <li><strong>Your agent cannot run anything, cannot do OAuth, or has to get its own key:</strong> Calotype, Urlbox with an organisation key, or Allscreenshots with an API key. Of those, only Calotype gives a key without an account, and it does the least.</li>
   </ul>
@@ -40,7 +40,7 @@
       <tr><td><a href="https://urlbox.com/docs/agents">Urlbox</a></td><td>Remote, run by Urlbox. A local bridge package forwards to it</td><td>OAuth, or an organisation API key in an <code>Authorization: Bearer</code> header; needs an account</td><td>No free plan. From $19 a month for 2,000 renders (Lo-Fi), or $49 for 5,000 (Hi-Fi) with a 7-day trial. "Renders bill exactly like API requests"</td><td>Hosted service; the bridge is MIT</td></tr>
       <tr><td><a href="https://docs.allscreenshots.com/tools/mcp">Allscreenshots</a></td><td>Remote, run by Allscreenshots</td><td>OAuth, once an owner or admin enables MCP; or an API key in an <code>X-API-Key</code> or <code>Authorization: Bearer</code> header</td><td>100 screenshots in total free, then from $10 a month for 2,500</td><td>Hosted service</td></tr>
       <tr><td><a href="https://screenshotapi.net/integrations/mcp-server">ScreenshotAPI.net</a></td><td>Local server (<code>npx</code>, Node.js 18 or newer), browser at ScreenshotAPI.net</td><td>API key in an environment variable; needs an account</td><td>100 credits a month free, then from $15 a month for 2,000. The MCP server is listed on every plan</td><td>MIT</td></tr>
-      <tr><td><a href="/agents">Calotype</a></td><td>Remote, run by Calotype</td><td>A key in an <code>Authorization: Bearer</code> header. The key comes from one <code>POST /v1/keys</code>, with no account. No OAuth</td><td>100 screenshots a month free, then $19 a month for 5,000 or $49 for 25,000</td><td>MIT for the code; hosted service</td></tr>
+      <tr><td><a href="/agents">Calotype</a></td><td>Remote, run by Calotype</td><td>A key in an <code>Authorization: Bearer</code> header. The key comes from one <code>POST /v1/keys</code>, with no account. <!--nooauth-->No OAuth<!--/nooauth--><!--oauth-->Or sign-in by OAuth, whose consent page makes a free key or takes one you paste<!--/oauth--></td><td>100 screenshots a month free, then $19 a month for 5,000 or $49 for 25,000</td><td>MIT for the code; hosted service</td></tr>
     </tbody>
   </table>
   </div>
@@ -110,7 +110,7 @@ claude mcp add --transport http calotype https://calotype.dev/mcp --header "Auth
     <li><strong>Price.</strong> The three local servers are free at any volume. Calotype is free for 100 screenshots a month.</li>
     <li><strong>Debugging.</strong> Chrome DevTools MCP gives the agent the console, the network log, performance traces and a Lighthouse audit. Nothing hosted on this page does.</li>
     <li><strong>Text instead of pixels.</strong> Playwright MCP's snapshots are text, so a model without vision can use them. ScreenshotOne, Urlbox, Allscreenshots and ScreenshotAPI.net can return a page as Markdown or text. Calotype returns an image only.</li>
-    <li><strong>Sign-in by OAuth.</strong> ScreenshotOne, Urlbox and Allscreenshots support it, so they work in clients that only connect that way. Calotype does not.</li>
+    <!--nooauth--><li><strong>Sign-in by OAuth.</strong> ScreenshotOne, Urlbox and Allscreenshots support it, so they work in clients that only connect that way. Calotype does not.</li><!--/nooauth-->
     <li><strong>Other outputs.</strong> PDF from ScreenshotOne, Urlbox, Allscreenshots and ScreenshotAPI.net; video from Urlbox and ScreenshotAPI.net.</li>
     <li><strong>Long pages.</strong> ScreenshotOne's slices and the just-every server's tiles are made for a model's image limits. Calotype returns one image, which for a long full page can be too tall to read once scaled down.</li>
     <li><strong>Pages behind a login.</strong> The local servers use your signed-in browser. Allscreenshots and ScreenshotAPI.net take cookies and headers. Calotype sends neither.</li>

@@ -498,3 +498,57 @@ def test_parallel_funnel_counts_are_all_kept(store):
         list(pool.map(lambda _: store.record_funnel("2026-11-20", "looked"), range(24)))
     assert store.funnel_days(["2026-11-20"])[0].looked == 24
 
+# --- OAuth authorization codes (oauth.py) -------------------------------------------------
+
+
+def _code(code_id: str, expires_at: int, **over):
+    from calotype.storage import OAuthCode
+
+    fields = dict(
+        id=code_id, client_hash="c" * 64, redirect_uri="https://claude.ai/api/mcp/auth_callback",
+        code_challenge="x" * 43, resource="https://calotype.dev/mcp", sealed_key="c2VhbGVk",
+        expires_at=expires_at, created_at=expires_at - 60,
+    )
+    fields.update(over)
+    return OAuthCode(**fields)
+
+
+def test_an_oauth_code_is_taken_once(store):
+    import time
+
+    now = int(time.time())
+    code = _code("a" * 64, now + 60)
+    store.save_oauth_code(code)
+    assert store.take_oauth_code("a" * 64) == code
+    assert store.take_oauth_code("a" * 64) is None  # single use
+    assert store.take_oauth_code("b" * 64) is None  # unknown
+    assert store.take_oauth_code("not-a-hash") is None
+
+
+def test_an_expired_oauth_code_is_not_given_and_is_gone(store):
+    import time
+
+    now = int(time.time())
+    store.save_oauth_code(_code("a" * 64, now + 60))
+    assert store.take_oauth_code("a" * 64, now=now + 61) is None
+    assert store.take_oauth_code("a" * 64) is None  # taking an expired code deletes it too
+
+
+def test_saving_a_code_deletes_expired_ones(store):
+    import time
+
+    now = int(time.time())
+    store.save_oauth_code(_code("a" * 64, now - 5))  # already expired
+    store.save_oauth_code(_code("b" * 64, now + 60))
+    dump = stored_text(store)
+    assert "a" * 64 not in dump and "b" * 64 in dump
+    assert store.take_oauth_code("b" * 64) is not None
+
+
+def test_parallel_takes_of_one_code_give_it_once(store):
+    import time
+
+    store.save_oauth_code(_code("a" * 64, int(time.time()) + 60))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: store.take_oauth_code("a" * 64), range(8)))
+    assert sum(r is not None for r in results) == 1
