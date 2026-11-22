@@ -606,9 +606,26 @@ def test_a_metadata_document_client_signs_in(oc, store):
     assert calls == [DOC_URL]  # cached for the second look at submit time
 
 
+def test_a_document_that_prefers_private_key_jwt_but_supports_none_is_public(oc):
+    # The shape of ChatGPT's published document (https://chatgpt.com/oauth/client.json, 22 Nov 2026).
+    url = "https://chatgpt.com/oauth/client.json"
+    redirect = "https://chatgpt.com/connector_platform_oauth_redirect"
+    use_documents(oc, {url: {
+        "client_id": url, "client_name": "ChatGPT", "redirect_uris": [redirect],
+        "token_endpoint_auth_method": "private_key_jwt", "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+    }})
+    verifier, challenge = pkce()
+    page = consent(oc, url, challenge, redirect_uri=redirect)
+    assert "identified by <code>chatgpt.com</code>" in page.text
+    _, params = redirect_params(submit(oc, hidden_fields(page.text), "approve"))
+    assert exchange(oc, url, params["code"], verifier, redirect_uri=redirect).status_code == 200
+
+
 @pytest.mark.parametrize(
     "doc",
     [
+        {"client_id": DOC_URL, "redirect_uris": [CB], "token_endpoint_auth_method": "private_key_jwt",
+         "token_endpoint_auth_methods_supported": ["private_key_jwt"]},
         {"client_id": "https://other.example/client.json", "redirect_uris": [CB]},
         {"client_id": DOC_URL, "redirect_uris": ["cursor://x/cb"]},
         {"client_id": DOC_URL, "redirect_uris": [CB], "token_endpoint_auth_method": "private_key_jwt"},

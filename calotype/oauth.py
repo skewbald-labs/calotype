@@ -462,7 +462,13 @@ class OAuthServer:
         valid = tuple(u for u in uris if redirect_uri_problem(u) is None) if isinstance(uris, list) else ()
         if not valid:
             raise OAuthError("invalid_client", "The client's metadata document lists no usable redirect URI.")
-        if (doc.get("token_endpoint_auth_method") or "none") != "none":
+        # Public clients only. A document may prefer another method but list "none" among
+        # the ones it supports (ChatGPT's does: private_key_jwt, then none); it then uses none here.
+        methods = doc.get("token_endpoint_auth_methods_supported")
+        public = (doc.get("token_endpoint_auth_method") or "none") == "none" or (
+            isinstance(methods, list) and "none" in methods
+        )
+        if not public:
             raise OAuthError("invalid_client", "Calotype accepts metadata-document clients as public clients only.")
         host = urlsplit(url).hostname or ""
         client = Client(url, clean_name(doc.get("client_name")), valid, "none", "metadata", host)
