@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="320" viewBox="0 0 1120 320">
+<rect width="1120" height="320" fill="#fbfaf7"/>
+<g transform="translate(40,40) scale(0.46875)"><rect width="512" height="512" rx="104" fill="#8a4b14"/><path d="M415.5 218A164 164 0 1 0 415.5 294H351.7A103 103 0 1 1 351.7 218Z" fill="#fbfaf7"/><circle cx="256" cy="256" r="36" fill="#fbfaf7"/></g>
+<text x="320" y="210" font-family="Inter, DejaVu Sans, sans-serif" font-size="140" font-weight="bold" fill="#1d1c1a" letter-spacing="-3">Calotype</text>
+</svg>
