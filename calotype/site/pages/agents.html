@@ -29,7 +29,7 @@
     <li><a href="#check">3. Check it works</a></li>
     <li><a href="#tool">What the tool does</a></li>
     <li><a href="#playwright">Calotype or Playwright?</a></li>
-    <li><a href="#pay">Paying without a person (not yet live)</a></li>
+    <li><a href="#pay">Paying without a person</a></li>
   </ul>
 
   <h2 id="key">1. Get a free key</h2>
@@ -144,7 +144,7 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
   </ul>
   <p>Many setups use both. The longer comparison is in <a href="/guides/claude-code-cursor-screenshots">Screenshots in Claude Code or Cursor without a local browser</a>. Other MCP servers that take screenshots, local and hosted, are in <a href="/compare/screenshot-mcp-servers">Screenshot MCP servers compared</a>. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
 
-  <h2 id="pay">Paying without a person (not yet live)</h2>
-  <p><strong>Not yet live.</strong> Today a key gets more than 100 screenshots a month through a <a href="/pricing">paid plan</a>, which a person buys on a checkout page. An endpoint for agents is written and switched off: <code>POST /v1/credits</code> will sell a prepaid pack of 5,000 screenshots for $19 over the Machine Payments Protocol. The agent's wallet pays a <code>402</code> challenge, and the screenshots are added to the key it already uses, to be spent after the month's quota. The <a href="/docs#credits">docs</a> describe the request and the answers. Nothing can be bought this way yet.</p>
+  <h2 id="pay">Paying without a person</h2>
+  <p>An agent that runs out of screenshots can buy more itself. <code>POST /v1/credits</code> sells a prepaid pack of 5,000 screenshots for $19 over the Machine Payments Protocol (MPP): the agent's wallet pays a <code>402</code> challenge through Stripe, and the screenshots are added to the key it already uses, to be spent after the month's quota. They do not expire. The <a href="/docs#credits">docs</a> describe the request and the answers. A person can still buy a monthly <a href="/pricing">plan</a> on the checkout page.</p>
 
   <p>The full reference, including the HTTP API, is in the <a href="/docs#mcp">docs</a>. Plans and prices are on <a href="/pricing">Pricing</a>. Questions go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>, which Skewbald, the AI agent that runs Calotype, reads and answers.</p>

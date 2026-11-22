@@ -1,6 +1,6 @@
   <h1>Privacy notice</h1>
   <p class="lede">Calotype is built to know as little about you as it can. This page says exactly what it keeps, what it logs, and what it never stores.</p>
-  <p class="muted">Last changed 20 November 2026.</p>
+  <p class="muted">Last changed 22 November 2026: prepaid packs.</p>
 
   <h2 id="who">Who is responsible</h2>
   <p>Calotype is sold by Dostal Technology, a Texas company, and built and run by Skewbald, an AI agent. Questions about this notice, and requests about your data, go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
@@ -25,6 +25,7 @@
     <li>for Calotype's own keys, a flag saying so: keys made by its operator rather than through the website, which may also carry a short label, and test keys its operator made through the website;</li>
     <li>if you reached the site through a link tagged like <code>?ref=dt-linkedin</code>, that tag. Calotype chooses these tags for its own posts, so they show which post brought a key. They say nothing about you;</li>
     <li>for paid keys only, the Stripe customer id and subscription id, which link the key to its subscription;</li>
+    <li>for keys that bought a <a href="/docs#credits">prepaid pack</a>, the prepaid balance and one record per purchase: the pack, its size and price, the Stripe payment id, when it was paid, and when it was refunded if it was;</li>
     <li>only if you gave one, an email address for <a href="#quota-emails">quota emails</a>, and a record of each quota email queued for the key.</li>
   </ul>
   <p>It also keeps the ids of the Stripe webhook events it has handled, so that a repeated event is not applied twice. Those ids say nothing about you.</p>
@@ -60,6 +61,7 @@
   <h2 id="payments">Payments</h2>
   <p>Payment for paid plans goes through Stripe Checkout, on Stripe's pages. Stripe collects your card and the contact and billing details its checkout asks for, and handles them under <a href="https://stripe.com/privacy">Stripe's privacy policy</a>. Calotype never sees your card.</p>
   <p>Calotype gives Stripe only the key's internal number and the plan, never the key. From Stripe it stores only the customer id and subscription id described above. What Stripe holds, such as the email address on your receipt, can be seen by the seller in its Stripe account and is used only to run your subscription and answer billing questions, such as refund requests.</p>
+  <p>A prepaid pack is paid with a payment token that the buyer's wallet, such as Link, issues through Stripe. Calotype passes the token to Stripe once, to take the payment, and does not keep it; it never sees the card behind it. It sends Stripe the key's internal number, the pack and the payment request's id, never the key, and keeps only the purchase record described above.</p>
 
   <h2 id="email">Email</h2>
   <p>Email you send to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a> stays in that inbox, which is hosted by AgentMail. Skewbald reads it to answer you. It is not copied into Calotype's database.</p>
@@ -72,7 +74,7 @@
 
   <h2 id="keeping">How long it is kept, and your choices</h2>
   <p>A key's record is kept for as long as the key exists. There is no automatic deletion yet. A quota-email address is kept only until you remove it, or the key is revoked or deleted.</p>
-  <p>To have a key's record deleted, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a> and include the key, which is how Calotype finds its record; the key stops working once the record is gone. For a paid key you can instead write from the email address on your Stripe receipt. Within 7 days of your request, the key's record (with its email address, if it had one), all its monthly usage counts and its quota-email records are deleted from Calotype's database for good. A paid key's subscription is cancelled first, so the plan ends and you are not charged again.</p>
+  <p>To have a key's record deleted, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a> and include the key, which is how Calotype finds its record; the key stops working once the record is gone. For a paid key you can instead write from the email address on your Stripe receipt. Within 7 days of your request, the key's record (with its email address, if it had one), all its monthly usage counts, its prepaid balance and purchase records, and its quota-email records are deleted from Calotype's database for good. A paid key's subscription is cancelled first, so the plan ends and you are not charged again.</p>
   <p>Two things are not deleted this way. Stripe keeps its own records of the payments you made, as the law requires of payment records; Calotype no longer holds the ids that link them to the key. And log lines already written, which carry the key's internal number but not the key or anything else about you, are not rewritten; they are removed when the logs' retention period ends.</p>
   <p>You can also simply stop using a free key; nothing else about you is held.</p>
 

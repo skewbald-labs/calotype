@@ -15,7 +15,7 @@
     <li><a href="#usage">Usage, plans and health</a></li>
     <li><a href="#mcp">MCP server for AI agents</a></li>
     <li><a href="#billing">Billing endpoints</a></li>
-    <li><a href="#credits">Prepaid credit for agents (not yet live)</a></li>
+    <li><a href="#credits">Prepaid credit for agents</a></li>
   </ol>
 
   <h2 id="basics">Basics</h2>
@@ -165,7 +165,7 @@
   <h3><code>GET /v1/usage</code></h3>
   <p>Your key's plan and this month's count. It needs the key and does not count as a screenshot.</p>
 <pre><code>{"plan": "free", "month": "2026-11", "used": 12, "limit": 100, "credits": 0, "resets_at": "2026-12-01T00:00:00Z", "key_ref": "3f9a0c71b2de", "email": "y***@example.com", "notices": true}</code></pre>
-  <p><code>credits</code> is the key's <a href="#credits">prepaid credit</a>: screenshots paid for in advance, used only after the month's <code>limit</code>. It is <code>0</code> for every key until prepaid credit goes on sale.</p>
+  <p><code>credits</code> is the key's <a href="#credits">prepaid credit</a>: screenshots paid for in advance, used only after the month's <code>limit</code>.</p>
   <p><code>key_ref</code> names your key without giving it away: quote it when you write to support, and never send the key itself. <code>email</code> is the key's <a href="#quota-emails">quota-email address</a>, masked, or <code>null</code>; <code>notices</code> says whether quota emails will be sent.</p>
   <h3><code>GET /v1/plans</code></h3>
   <p>The plans, their monthly quotas and prices in US dollars. No key needed. <code>provisional</code> is <code>true</code> only on a server where paid plans are not on sale.</p>
@@ -222,16 +222,15 @@
   </table>
   </div>
 
-  <h2 id="credits">Prepaid credit for agents (not yet live)</h2>
-  <p><strong>Not yet live.</strong> This endpoint is written and tested, but it is switched off on <code><span class="origin">https://calotype.dev</span></code>: it answers <code>503 billing_unavailable</code>, and nothing can be bought through it today. The terms of service and the refund policy do not cover prepaid packs yet. This section describes how it will work, so that agent builders can plan for it. Until then, a key gets more screenshots through a <a href="/pricing">paid plan</a>.</p>
-  <p>It is for an agent that runs out of screenshots with nobody there to open a checkout page. The agent pays from its own wallet over the Machine Payments Protocol (MPP), and the screenshots are added to the key it already uses. Payment goes through Stripe, with a card held in a wallet that issues Stripe shared payment tokens, such as Link. Stablecoin payment is not built.</p>
+  <h2 id="credits">Prepaid credit for agents</h2>
+  <p>It is for an agent that runs out of screenshots with nobody there to open a checkout page. The agent pays from its own wallet over the Machine Payments Protocol (MPP), and the screenshots are added to the key it already uses. Payment goes through Stripe, with a card held in a wallet that issues Stripe shared payment tokens, such as Link. Stablecoin payment is not offered yet.</p>
   <h3><code>POST /v1/credits</code></h3>
   <p>Send the key and the pack to buy:</p>
 <pre><code>curl -i -X POST <span class="origin">https://calotype.dev</span>/v1/credits \
   -H "Authorization: Bearer cal_..." \
   -H "Content-Type: application/json" \
   -d '{"pack": "starter"}'</code></pre>
-  <p>One pack is planned: <code>starter</code>, 5,000 screenshots for $19, paid once. It is not a subscription and is not charged again. <code>GET /v1/plans</code> lists the packs as <code>credit_packs</code> on a server where they are on sale.</p>
+  <p>One pack is on sale: <code>starter</code>, 5,000 screenshots for $19, paid once. It is not a subscription and is not charged again. <code>GET /v1/plans</code> lists the packs as <code>credit_packs</code> on a server where they are on sale.</p>
   <ol>
     <li><strong>Unpaid, the answer is <code>402</code>.</strong> The <code>WWW-Authenticate</code> header holds a <code>Payment</code> challenge with <code>method="stripe"</code> and <code>intent="charge"</code>. Its <code>request</code> is base64url JSON with the <code>amount</code> in cents (<code>"1900"</code>), the <code>currency</code> (<code>"usd"</code>) and the seller's Stripe profile. The challenge is valid for five minutes and only for the key that asked.</li>
     <li><strong>Pay it.</strong> An MPP client does this step itself: it gets a shared payment token for that amount and builds the credential. With a card wallet, the wallet's owner may be asked to approve the spend.</li>

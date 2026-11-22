@@ -260,7 +260,7 @@ def test_the_privacy_notice_describes_the_deletion_this_cli_does():
     text = " ".join((SITE_DIR / "pages" / "privacy.html").read_text().split())
     assert (
         "Within 7 days of your request, the key's record (with its email address, if it had one), "
-        "all its monthly usage counts and its quota-email records are deleted"
+        "all its monthly usage counts, its prepaid balance and purchase records, and its quota-email records are deleted"
     ) in text
     assert "subscription is cancelled first" in text and "Stripe keeps its own records" in text
     with pytest.raises(SystemExit) as done:

@@ -1,6 +1,6 @@
   <h1>Terms of service</h1>
   <p class="lede">The deal for using Calotype, in plain English.</p>
-  <p class="muted">In force from 17 November 2026. Written by Skewbald, an AI agent, and approved by Dostal Technology.</p>
+  <p class="muted">In force from 17 November 2026. Written by Skewbald, an AI agent, and approved by Dostal Technology. Updated 22 November 2026 by Skewbald to add prepaid packs.</p>
 
   <h2 id="who">1. Who we are</h2>
   <p>Calotype is a website screenshot API sold by Dostal Technology, a Texas company ("we", "us"). It is built and run by Skewbald, an AI agent: the code, the running service and the support replies are the agent's work, on Dostal Technology's behalf. "You" means whoever uses the service or holds a key.</p>
@@ -11,6 +11,7 @@
     <li><strong>Free:</strong> 100 screenshots a month, no charge, no account.</li>
     <li><strong>Starter:</strong> 5,000 screenshots a month for $19.</li>
     <li><strong>Pro:</strong> 25,000 screenshots a month for $49.</li>
+    <li><strong>Prepaid pack:</strong> 5,000 screenshots for $19, paid once and bought by an agent with <code>POST /v1/credits</code>. A pack's screenshots are used only after the key's monthly quota runs out, and they do not expire.</li>
   </ul>
   <p>Prices are in US dollars. Quotas run per key per calendar month in UTC; only successful screenshots count. The <a href="/pricing">pricing page</a> has the details. Prices do not include sales tax. Where Calotype must collect it, Stripe adds it at checkout and shows it before you pay.</p>
 
@@ -22,6 +23,7 @@
 
   <h2 id="payment">5. Payment</h2>
   <p>Paid plans are paid through Stripe. Stripe processes your card; we never see it. A paid plan is a monthly subscription, charged in advance at the start of each monthly period, starting on the day you buy it, until you cancel. If you switch between Starter and Pro, Stripe prorates the price. If a payment fails, the key keeps its plan while Stripe retries the card; if the payment cannot be collected, the subscription ends and the key returns to the free plan.</p>
+  <p>A prepaid pack is a single payment, not a subscription, and is never charged again. It is paid over the Machine Payments Protocol with a payment token that the buyer's wallet, such as Link, issues through Stripe for the exact price in Calotype's payment request. Calotype sends that token to Stripe once and never sees the card behind it. The screenshots are added to the key that asked, once Stripe confirms the payment; sending the same paid request again charges nothing more. Whoever holds the wallet that paid is the buyer.</p>
 
   <h2 id="cancel">6. Cancellation</h2>
   <p>You can cancel any time in the Stripe customer portal, reached from the <a href="/pricing#change">pricing page</a>. Cancellation takes effect at the end of the month you have paid for: the key keeps its plan until then, is not charged again, and then returns to the free plan.</p>
@@ -31,10 +33,10 @@
 
   <h2 id="availability">8. Availability and changes</h2>
   <p>We aim to keep Calotype running, but there is no service level agreement and no promise of uptime. The service may be slow or unavailable, and a capture may fail; failed captures are not counted against your quota.</p>
-  <p>We may change, add or remove features, limits and prices. For paid plans, we will give at least 30 days' notice before a price rise or a cut to a plan's quota takes effect, by email to the address on your Stripe account and on this site. You can cancel before the change applies. We may change these terms the same way; changes for paid plans take effect after 30 days' notice.</p>
+  <p>We may change, add or remove features, limits and prices. For paid plans, we will give at least 30 days' notice before a price rise or a cut to a plan's quota takes effect, by email to the address on your Stripe account and on this site. You can cancel before the change applies. We may change these terms the same way; changes for paid plans take effect after 30 days' notice. A change never takes away screenshots from a prepaid pack already bought.</p>
 
   <h2 id="suspension">9. Suspension</h2>
-  <p>We may revoke a key at once and without notice if it is used in breach of the acceptable use policy or these terms, if it is used to attack anyone, or if the law requires it. A revoked key stops working. If it was on a paid plan, we cancel the subscription so it is not charged again.</p>
+  <p>We may revoke a key at once and without notice if it is used in breach of the acceptable use policy or these terms, if it is used to attack anyone, or if the law requires it. A revoked key stops working. If it was on a paid plan, we cancel the subscription so it is not charged again. Unused prepaid screenshots on a key revoked for a breach are not refunded. A key revoked because it leaked, at your request, is treated as a refund request for its unused prepaid screenshots.</p>
 
   <h2 id="your-urls">10. The pages you capture</h2>
   <p>You choose the pages Calotype captures, and you are responsible for that choice. Make sure you are allowed to view each page and to use the image the way you plan to. The images are yours to use as far as your rights in the page allow; we claim no rights in them and keep no copy.</p>
