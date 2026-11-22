@@ -38,6 +38,7 @@ from .credits import MIN_CARD_CENTS
 from .credits import UNAVAILABLE_MESSAGE as CREDITS_UNAVAILABLE_MESSAGE
 from .credits import CreditsProvider, PaymentRefused, PaymentUnconfirmed, credits_from_env
 from .logs import log_event, setup_logging
+from .oauth import OAuthServer, add_oauth_routes, oauth_enabled
 from .notices import mask_email, normalize_email, notices_enabled, thresholds_at, token_key_id, token_matches
 from .params import ScreenshotParams
 from .pages import SITE_ORIGIN, TryLimits, add_site_routes
@@ -202,6 +203,8 @@ def create_app(
             )
         if not notices_on:
             log_event(log, "quota emails are off", needs="CALOTYPE_EMAIL_TOKEN_SECRET (32+ characters)")
+        if app.state.oauth is None:
+            log_event(log, "oauth sign-in is off", needs="CALOTYPE_OAUTH_SECRET (32+ characters)")
         sweeper = asyncio.create_task(sweep_limiters())
         try:
             async with app.state.mcp.run():
@@ -218,6 +221,7 @@ def create_app(
             app.state.key_global_limiter.sweep()
             app.state.credit_limiter.sweep()
             app.state.try_limiter.sweep()
+            app.state.oauth_register_limiter.sweep()
 
     app = FastAPI(
         title="Calotype",
@@ -241,6 +245,8 @@ def create_app(
     app.state.key_global_limiter = SlidingWindowLimiter(settings.keys_global_per_hour)
     # Free tries on the home page (tries.py), per client IP; in memory only, like the above.
     app.state.try_limiter = SlidingWindowLimiter(settings.tries_per_ip_per_hour)
+    # OAuth client registrations (oauth.py), per client IP; in memory only, like the above.
+    app.state.oauth_register_limiter = SlidingWindowLimiter(settings.oauth_registrations_per_ip_per_hour)
 
     @app.exception_handler(ApiError)
     async def _api_error(_request: Request, exc: ApiError):
@@ -454,6 +460,11 @@ def create_app(
             headers["X-Calotype-Credits"] = str(shot.credits)
         return Response(content=result.image, media_type=result.content_type, headers=headers)
 
+    # OAuth sign-in for /mcp (oauth.py): off, and its discovery 404, without CALOTYPE_OAUTH_SECRET.
+    oauth = OAuthServer(secret=settings.oauth_secret, issuer=site_origin, policy=policy) if oauth_enabled(
+        settings.oauth_secret) else None
+    app.state.oauth = oauth
+
     # The remote MCP server: the same keys, quota and capture path, over MCP.
     mcp = RemoteMCP(
         authenticate=lambda request: authenticate(request, allow_query=False),
@@ -462,9 +473,13 @@ def create_app(
         site_origin=settings.public_url or SITE_ORIGIN,
         free_quota=settings.plans["free"].monthly_quota if "free" in settings.plans else None,
         tag_source=lambda key, tag: asyncio.to_thread(app.state.storage.tag_source, key.id, tag),
+        challenge=oauth.challenge_for if oauth else None,
+        challenge_keyless_calls=settings.mcp_keyless_call != "result",
     )
     app.state.mcp = mcp
     app.add_route("/mcp", mcp, methods=["GET", "POST", "DELETE"], include_in_schema=False)
+    if oauth is not None:
+        add_oauth_routes(app, oauth, settings=settings, site_dir=SITE_DIR)
 
     # Cloud Run's front end keeps /healthz for itself on run.app addresses, so
     # /health is the public path; /healthz stays for the container's own check.

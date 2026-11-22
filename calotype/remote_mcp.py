@@ -27,6 +27,13 @@ What this module adds around the SDK:
   ``initialize``, ``tools/list`` and ``ping`` work, so directories and
   inspectors can see the tool; ``tools/call`` answers a tool error that says
   how to get a free key in one call, and captures nothing.
+* **OAuth.** With OAuth on (``oauth.py``), every 401 carries
+  ``WWW-Authenticate: Bearer resource_metadata="..."`` (RFC 9728), which is
+  how OAuth clients find the sign-in. A keyless ``tools/call`` then answers
+  HTTP 401 with that header instead of the tool error, because claude.ai and
+  other OAuth clients start sign-in only on a 401, never on a 200 tool result.
+  ``initialize``, ``tools/list`` and ``ping`` still work with no key.
+  ``CALOTYPE_MCP_KEYLESS_CALL=result`` keeps the old tool error instead.
 * **Origin.** The transport spec says a server must refuse a request whose
   ``Origin`` header is present and not allowed. Only the site's own origin is
   allowed; programs that are not browsers send no ``Origin``. The ``Host``
@@ -87,13 +94,16 @@ TOOL_DESCRIPTION = (
 )
 
 
-def key_help(site_origin: str, free_quota: int | None) -> str:
+def key_help(site_origin: str, free_quota: int | None, oauth: bool = False) -> str:
     """What to tell a caller who sent no key, or a wrong one."""
     free = f"{free_quota} screenshots a month, " if free_quota else ""
-    return (
+    text = (
         "Calotype needs an API key in the header 'Authorization: Bearer <key>'. "
         f"Get a free key ({free}no sign-up) at {site_origin}/#key, or with: curl -X POST {site_origin}/v1/keys"
     )
+    if oauth:
+        text += ". Or sign in with OAuth: a client that supports it makes a free key on approval."
+    return text
 
 
 class RemoteMCP:
@@ -113,13 +123,19 @@ class RemoteMCP:
         site_origin: str,
         free_quota: int | None,
         tag_source: Callable[[Any, str], Awaitable[None]] | None = None,
+        challenge: Callable[[Request, str | None], str] | None = None,
+        challenge_keyless_calls: bool = False,
     ):
+        # With OAuth on: the WWW-Authenticate value for a 401 (oauth.OAuthServer.challenge_for),
+        # and whether a keyless tools/call answers 401 rather than a tool error.
+        self._challenge = challenge
+        self._challenge_keyless_calls = bool(challenge) and challenge_keyless_calls
         self._authenticate = authenticate
         self._tag_source = tag_source
         self._capture = capture
         self._api_error = api_error
         self.site_origin = site_origin.rstrip("/")
-        self.key_help = key_help(self.site_origin, free_quota)
+        self.key_help = key_help(self.site_origin, free_quota, oauth=challenge is not None)
         self.server = self._build_server()
         self._manager = None
 
@@ -231,13 +247,26 @@ class RemoteMCP:
             code = getattr(e, "code", "invalid_key")
             if code != "missing_key":
                 message = f"The API key is not valid. {self.key_help}"
-                await _rpc_error(401, _UNAUTHORIZED, message, code, {"WWW-Authenticate": "Bearer"})(scope, receive, send)
+                header = {"WWW-Authenticate": self._www_authenticate(request, "invalid_token")}
+                await _rpc_error(401, _UNAUTHORIZED, message, code, header)(scope, receive, send)
                 return
             # No key at all: let the client connect and list the tool, so
             # directories and inspectors can see what the server offers. A
             # tool call without a key answers with how to get one, and
             # captures nothing.
             key = None
+        if key is None and self._challenge_keyless_calls:
+            # OAuth clients sign in only after an HTTP 401 with WWW-Authenticate, so a
+            # keyless tool call gets one; the discovery methods above still pass.
+            body = await request.body()
+            call_id = _tool_call_id(body)
+            if call_id is not _NO_CALL:
+                header = {"WWW-Authenticate": self._www_authenticate(request, None)}
+                await _rpc_error(401, _UNAUTHORIZED, self.key_help, "missing_key", header, call_id)(
+                    scope, receive, send
+                )
+                return
+            receive = _replay(body, receive)
         if key is not None:
             setattr(request.state, _KEY_STATE, key)
             ref = request.query_params.get("ref")
@@ -254,9 +283,47 @@ class RemoteMCP:
         await self._manager.handle_request(scope, receive, send)
 
 
-def _rpc_error(status: int, rpc_code: int, message: str, code: str, headers: dict[str, str] | None = None):
+    def _www_authenticate(self, request: Request, error: str | None) -> str:
+        return self._challenge(request, error) if self._challenge else "Bearer"
+
+
+_NO_CALL = object()
+
+
+def _tool_call_id(body: bytes) -> Any:
+    """The JSON-RPC id of a ``tools/call`` in ``body`` (a message or a batch); ``_NO_CALL`` if none."""
+    import json
+
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return _NO_CALL
+    for message in data if isinstance(data, list) else [data]:
+        if isinstance(message, dict) and message.get("method") == "tools/call":
+            ident = message.get("id")
+            return ident if isinstance(ident, (str, int)) and not isinstance(ident, bool) else None
+    return _NO_CALL
+
+
+def _replay(body: bytes, receive: Receive) -> Receive:
+    """An ASGI ``receive`` that hands the SDK the body this module already read, then the real stream."""
+    sent = False
+
+    async def replay() -> dict:
+        nonlocal sent
+        if sent:
+            return await receive()
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return replay
+
+
+def _rpc_error(
+    status: int, rpc_code: int, message: str, code: str, headers: dict[str, str] | None = None, rpc_id: Any = None
+):
     """An HTTP error whose body is also a JSON-RPC error, for clients that read either."""
-    body = {"jsonrpc": "2.0", "id": None, "error": {"code": rpc_code, "message": message, "data": {"code": code}}}
+    body = {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": rpc_code, "message": message, "data": {"code": code}}}
     return JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **(headers or {})})
 
 

@@ -42,6 +42,12 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     ``rendered`` and one count per outcome. Never a URL, host or IP address.
     ``rendered`` is the shared daily cap, taken by ``try_admit`` exactly as
     ``try_consume`` takes a key's quota (below).
+``{prefix}oauth_codes/{SHA-256 of the code}``
+    One short-lived OAuth authorization code (``storage.OAuthCode``): the
+    client id's hash, redirect address, PKCE challenge, resource, the sealed
+    key and ``expires_at`` (Unix seconds). Taken once, in a transaction that
+    reads and deletes it; codes that expired unused are deleted when a new
+    one is saved (a single-field range query, so no index to deploy).
 
 No name, IP address or URL is stored; an email address only if the key's
 holder gave one, on the key's own document.
@@ -107,6 +113,7 @@ from .storage import (
     Contact,
     CreditPurchase,
     Notice,
+    OAuthCode,
     TryDay,
     generate_key,
     hash_key,
@@ -138,6 +145,7 @@ class FirestoreStorage:
         self._purchases = self._client.collection(f"{collection_prefix}credit_purchases")
         self._notices = self._client.collection(f"{collection_prefix}notices")
         self._tries = self._client.collection(f"{collection_prefix}tries")
+        self._codes = self._client.collection(f"{collection_prefix}oauth_codes")
 
     # --- plumbing -----------------------------------------------------------------
 
@@ -151,7 +159,7 @@ class FirestoreStorage:
         """The collections this store writes to (used by tests and cleanup)."""
         return [
             self._keys, self._usage, self._counter.parent, self._events,
-            self._credits, self._purchases, self._notices, self._tries,
+            self._credits, self._purchases, self._notices, self._tries, self._codes,
         ]
 
     @staticmethod
@@ -588,6 +596,49 @@ class FirestoreStorage:
                 found[snap.id] = TryDay(snap.id, **{n: int(doc.get(n) or 0) for n in names})
         return [found.get(d, TryDay(d)) for d in days]
 
+    # --- OAuth authorization codes (oauth.py) ---------------------------------------
+
+    def save_oauth_code(self, code: OAuthCode) -> None:
+        """Store a new code (``create``: a code id is never reused), and delete expired ones."""
+        now = int(time.time())
+        expired = self._codes.where(filter=FieldFilter("expires_at", "<", now)).limit(50).stream()
+        batch, pending = self._client.batch(), 0
+        for doc in expired:
+            batch.delete(doc.reference)
+            pending += 1
+        if pending:
+            batch.commit()
+        data = asdict(code)
+        data["created_at"] = int(code.created_at or now)
+        self._codes.document(_code_doc_id(code.id)).create(data)
+
+    def take_oauth_code(self, code_id: str, now: int | None = None) -> OAuthCode | None:
+        """Delete the code and return it, once. None if unknown, already taken or expired.
+
+        The read and the delete run in one transaction, so of two instances
+        taking the same code at once, only one gets it.
+        """
+        now = int(time.time()) if now is None else now
+        try:
+            ref = self._codes.document(_code_doc_id(code_id))
+        except ValueError:
+            return None
+
+        @firestore.transactional
+        def take(t) -> dict | None:
+            snap = ref.get(transaction=t)
+            if not snap.exists:
+                return None
+            t.delete(ref)
+            return snap.to_dict()
+
+        doc = take(self._client.transaction())
+        if doc is None:
+            return None
+        names = {f.name for f in fields(OAuthCode)}
+        code = OAuthCode(**{k: v for k, v in doc.items() if k in names})
+        return code if int(code.expires_at) >= now else None
+
     # --- contacts -----------------------------------------------------------------------
 
     def list_contacts(self) -> list[Contact]:
@@ -627,6 +678,13 @@ def _event_doc_id(event_id: str) -> str:
     if not event_id or "/" in event_id or event_id in (".", "..") or event_id.startswith("__"):
         raise ValueError("not a usable event id")
     return event_id
+
+
+def _code_doc_id(code_id: str) -> str:
+    # Always a SHA-256 hex digest; anything else is refused rather than used as a path.
+    if len(code_id) != 64 or any(c not in "0123456789abcdef" for c in code_id):
+        raise ValueError("not a code id")
+    return code_id
 
 
 def _purchase_doc_id(purchase_id: str) -> str:
