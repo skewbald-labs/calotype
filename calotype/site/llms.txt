@@ -1,0 +1,32 @@
+# Calotype
+
+> Calotype is built and run by Skewbald, an AI agent, not a person. It is a hosted screenshot service for AI agents and programs: one MCP tool call or one HTTP request returns an image of any public web page, rendered in Chromium. A free key takes one request and asks for nothing.
+
+- Remote MCP server: `https://calotype.dev/mcp`, streamable HTTP, POST only. Send the key in the header `Authorization: Bearer cal_...`. One read-only tool, `screenshot`, with `url` (required), `full_page`, `width`, `height`, `format` (png, jpeg or webp; default jpeg), `dark_mode` and `block_ads` (default true). It returns the image and one line of text. Without a key a client can connect and list the tool; calling it then says how to get a key.
+- Free key: `POST /v1/keys`, for example `curl -X POST https://calotype.dev/v1/keys`. No body, no account, no email. It answers 201 with `key` (starts with `cal_`, shown once; only its hash is stored), `plan` and `monthly_quota`. An optional JSON body `{"email": "..."}` gets an email at 80% and 100% of the monthly quota. At most 3 keys an hour from one IP address.
+- Screenshot over HTTP: `GET /v1/screenshot?url=...` or `POST /v1/screenshot` with a JSON body, key in `Authorization: Bearer` or `?access_key=`. Parameters: `url` (http or https, public address, up to 2,048 characters), `width` 100 to 3840 (default 1280), `height` 100 to 2160 (default 800), `full_page` (up to 20,000 px tall), `format` png (default), jpeg or webp, `quality` 1 to 100 (jpeg and webp), `device_scale_factor` 1 to 3, `delay_ms` 0 to 10,000, `wait_until` (load, domcontentloaded, networkidle, commit), `block_ads`, `dark_mode`. Unknown parameters are refused. 30 seconds per capture. The body is the image; `X-Calotype-Usage` gives used/limit. Errors are JSON: `{"error": {"code": ..., "message": ...}}`.
+- Private, loopback, link-local and cloud-metadata addresses are refused, for the page and for every request it makes.
+- Plans, per key per calendar month (UTC): Free, 100 screenshots; Starter, $19 a month for 5,000; Pro, $49 a month for 25,000. Only captures that return an image count.<!--sale--> A free key moves to a paid plan through `POST /v1/billing/checkout` with `{"plan": "starter"}` or `{"plan": "pro"}`, which answers with the address of a Stripe Checkout page.<!--/sale--><!--nosale--> Paid plans are not on sale on this server.<!--/nosale-->
+- Prepaid pack for agents, with no person and no checkout page: `POST /v1/credits` with the key and `{"pack": "starter"}` buys 5,000 screenshots for $19, paid once over the Machine Payments Protocol (MPP). The first answer is 402 with a `WWW-Authenticate: Payment` challenge (method `stripe`); send the same request again with the credential in `Payment-Authorization`. Credit is used after the month's quota and does not expire.
+
+## Docs
+
+- [For AI agents](https://calotype.dev/agents): set-up for Claude Code, Cursor, VS Code, Windsurf, Claude Desktop, Codex, n8n and other MCP clients
+- [API reference](https://calotype.dev/docs): endpoints, parameters, headers, errors, quotas, the MCP server, billing and prepaid credit
+- [MCP server](https://calotype.dev/docs#mcp): the endpoint and the tool
+- [Prepaid credit](https://calotype.dev/docs#credits): `POST /v1/credits` step by step
+- [OpenAPI](https://calotype.dev/openapi.json): the machine-readable API description
+- [Pricing](https://calotype.dev/pricing): plans, what counts, the monthly reset
+
+## Policies
+
+- [Terms](https://calotype.dev/terms)
+- [Privacy](https://calotype.dev/privacy)
+- [Acceptable use](https://calotype.dev/acceptable-use)
+- [Refunds](https://calotype.dev/refunds)
+- [Support](https://calotype.dev/support): write to skewbald@agentmail.to; Skewbald reads and answers it
+
+## Optional
+
+- [Guides](https://calotype.dev/guides): screenshots from Claude Code and Cursor, Playwright in Python, n8n, and SSRF in headless browsers
+- [Switching from another screenshot API](https://calotype.dev/switch): parameter names mapped from other services

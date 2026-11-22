@@ -1040,3 +1040,66 @@ def test_h8_page_stays_plain_and_claims_no_first_place(site, page):
     # No images, forms or scripts of its own: nothing of the other sites is shown.
     assert "<img" not in main and "<form" not in main and "<script" not in main
 
+
+
+# --- /llms.txt ---------------------------------------------------------------------------------
+
+
+def test_llms_txt_is_served_as_plain_text(site):
+    r = site.get("/llms.txt")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert r.text.startswith("# Calotype\n\n> Calotype is built and run by Skewbald, an AI agent")
+    assert site.head("/llms.txt").status_code == 200
+    assert "<!--" not in r.text  # the sale markers are resolved
+
+
+def test_llms_txt_links_only_to_pages_that_exist(site):
+    text = site.get("/llms.txt").text
+    links = re.findall(r"\]\((https://calotype\.dev[^)\s]*)\)", text)
+    assert len(links) >= 10
+    paths = {p.path for p in PAGES}
+    for link in links:
+        path, _, anchor = link[len(SITE_ORIGIN):].partition("#")
+        if path == "/openapi.json":
+            assert site.get(path).status_code == 200
+            continue
+        assert path in paths, link
+        if anchor:
+            assert f'id="{anchor}"' in site.get(path).text, link
+
+
+def test_llms_txt_facts_match_the_code(site, settings):
+    from calotype.params import MAX_DELAY_MS, MAX_FULL_PAGE_HEIGHT, MAX_HEIGHT, MAX_WIDTH
+    from calotype.ssrf import MAX_URL_LENGTH
+
+    text = site.get("/llms.txt").text
+    plans = settings.plans
+    assert f"Free, {plans['free'].monthly_quota} screenshots" in text
+    for name in ("starter", "pro"):
+        plan = plans[name]
+        assert f"{plan.title}, ${plan.price_usd_cents // 100} a month for {plan.monthly_quota:,}" in text
+    pack = settings.with_plans().credit_packs["starter"]
+    assert '{"pack": "starter"}' in text
+    assert f"buys {pack.screenshots:,} screenshots for ${pack.price_usd_cents // 100}, paid once" in text
+    assert f"At most {settings.keys_per_ip_per_hour} keys an hour from one IP address" in text
+    assert f"up to {MAX_URL_LENGTH:,} characters" in text
+    assert f"`width` 100 to {MAX_WIDTH}" in text and f"`height` 100 to {MAX_HEIGHT}" in text
+    assert f"up to {MAX_FULL_PAGE_HEIGHT:,} px tall" in text and f"`delay_ms` 0 to {MAX_DELAY_MS:,}" in text
+    assert f"{settings.capture_timeout_s} seconds per capture" in text
+    for path in ("https://calotype.dev/mcp", "POST /v1/keys", "/v1/screenshot", "POST /v1/credits"):
+        assert path in text
+
+
+def test_llms_txt_without_checkout_does_not_offer_paid_plans(settings, sqlite_store):
+    app = create_app(settings, policy=AddressPolicy(resolver=fake_resolver), storage=sqlite_store,
+                     renderer=FakeRenderer())
+    with TestClient(app) as c:
+        text = c.get("/llms.txt").text  # the test app has no Stripe settings
+    assert "Paid plans are not on sale on this server." in text
+    assert "/v1/billing/checkout" not in text
+
+
+def test_llms_txt_is_not_in_the_sitemap_and_not_disallowed(site):
+    assert "llms.txt" not in site.get("/sitemap.xml").text
+    assert "Disallow: /llms" not in site.get("/robots.txt").text

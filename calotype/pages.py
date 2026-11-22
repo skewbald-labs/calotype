@@ -310,8 +310,15 @@ def robots_txt() -> str:
     return f"User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /try\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
 
 
+def llms_txt(site_dir: Path, paid_open: bool = True) -> str:
+    """``/llms.txt`` (https://llmstxt.org): what Calotype is, for a model, in plain Markdown.
+
+    Not in the sitemap, which lists the HTML pages; like /robots.txt it sits at a fixed path."""
+    return sale_text((site_dir / "llms.txt").read_text(encoding="utf-8"), paid_open)
+
+
 def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits()) -> None:
-    """Serve every page in ``PAGES``, plus /robots.txt and /sitemap.xml (GET and HEAD).
+    """Serve every page in ``PAGES``, plus /robots.txt, /sitemap.xml and /llms.txt (GET and HEAD).
 
     ``paid_open`` is whether this server sells paid plans (Stripe is set up); it picks the
     sale or no-sale text in each page. ``tries`` are the limits the home page's try box states."""
@@ -345,6 +352,9 @@ def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True, tries:
         app.add_route(path, page_endpoint(path), include_in_schema=False)
     app.add_route("/robots.txt", text_endpoint(robots_txt(), "text/plain; charset=utf-8"), include_in_schema=False)
     app.add_route("/sitemap.xml", text_endpoint(sitemap_xml(), "application/xml"), include_in_schema=False)
+    if (site_dir / "llms.txt").is_file():
+        app.add_route("/llms.txt", text_endpoint(llms_txt(site_dir, paid_open), "text/plain; charset=utf-8"),
+                      include_in_schema=False)
     for path, (data, media_type) in {**brand_files(site_dir), **image_files(site_dir)}.items():
         app.add_route(path, file_endpoint(data, media_type), include_in_schema=False)
 
