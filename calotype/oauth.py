@@ -582,10 +582,15 @@ def consent_content(
 """
 
 
-def problem_content(title: str, text: str) -> str:
+def problem_content(title: str, text: str, back: str = "") -> str:
+    """An error page. ``back``: a link to the app's redirect URI carrying the error, for the person to follow."""
+    link = ""
+    if back:
+        host = html.escape(urlsplit(back).hostname or "")
+        link = f'  <p><a href="{html.escape(back, quote=True)}">Return to {host} with this error</a></p>\n'
     return f"""  <h1>{html.escape(title)}</h1>
   <p class="lede">{html.escape(text)}</p>
-  <p>Start again from the app you were connecting. How sign-in works: <a href="/docs#oauth">Docs</a>.</p>
+{link}  <p>Start again from the app you were connecting. How sign-in works: <a href="/docs#oauth">Docs</a>.</p>
 """
 
 
@@ -731,8 +736,16 @@ def add_oauth_routes(app: FastAPI, server: OAuthServer, *, settings, site_dir: P
         state = fields["state"]
 
         def refuse(error: str, description: str) -> Response:
+            # A page, not a redirect: anyone can register any https redirect URI, so sending the
+            # browser there before the person has chosen anything would make this an open
+            # redirector (OAuth 2.1 section 7.12.2). The person may follow the link back.
             log_event(log, "oauth authorize refused", error=error, client=client_tag(client.name))
-            return back_to_client(fields["redirect_uri"], {"error": error, "error_description": description}, state)
+            back = _with_params(
+                fields["redirect_uri"],
+                {"error": error, "error_description": description, **({"state": state} if state else {}),
+                 "iss": server.issuer},
+            )
+            return html_page(problem_content("This sign-in request is not valid", description, back), 400)
 
         if len(state) > MAX_STATE_LEN:
             return refuse("invalid_request", "state is too long.")

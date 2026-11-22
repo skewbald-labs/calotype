@@ -344,12 +344,18 @@ def test_a_bad_client_or_redirect_gets_a_page_not_a_redirect(oc):
         ({"state": "s" * 1001}, "invalid_request"),
     ],
 )
-def test_other_authorize_errors_go_back_to_the_client(oc, over, error):
+def test_other_authorize_errors_are_a_page_with_a_link_back(oc, over, error):
+    # Not an automatic redirect: registration is open, so that would make an open redirector.
     client = register(oc)
     _, challenge = pkce()
     q = authorize_query(client["client_id"], challenge, **over)
-    where, params = redirect_params(oc.get("/oauth/authorize", params=q, follow_redirects=False))
-    assert where == CB and params["error"] == error and params["iss"] == ISSUER
+    r = oc.get("/oauth/authorize", params=q, follow_redirects=False)
+    assert r.status_code == 400 and "location" not in r.headers
+    href = html.unescape(re.search(r'<a href="([^"]+)">Return to claude.ai', r.text).group(1))
+    parts = urlsplit(href)
+    params = {k: v[0] for k, v in parse_qs(parts.query).items()}
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == CB
+    assert params["error"] == error and params["iss"] == ISSUER
 
 
 def test_resource_forms_that_name_this_server_are_accepted(oc):
