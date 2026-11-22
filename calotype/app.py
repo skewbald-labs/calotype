@@ -30,7 +30,7 @@ from .billing import (
     InvalidWebhook,
     billing_from_env,
 )
-from . import mpp
+from . import funnel, mpp
 from .capture import CaptureError, CaptureResult, Renderer, load_blocklist
 from .config import SITE_DIR, CreditPack, Settings
 from .credits import HANDLED_EVENTS as CREDIT_EVENTS
@@ -241,6 +241,8 @@ def create_app(
     app.state.key_global_limiter = SlidingWindowLimiter(settings.keys_global_per_hour)
     # Free tries on the home page (tries.py), per client IP; in memory only, like the above.
     app.state.try_limiter = SlidingWindowLimiter(settings.tries_per_ip_per_hour)
+    # Daily counts of the steps toward a key (funnel.py); written after each response.
+    funnel.install(app)
 
     @app.exception_handler(ApiError)
     async def _api_error(_request: Request, exc: ApiError):
@@ -382,6 +384,7 @@ def create_app(
         if total_ok == 1 and not key.internal:
             # A new contact for the demand test: a non-internal key's first success.
             ordinal = await asyncio.to_thread(store.contact_ordinal, key.id)
+            funnel.mark(request, "first_capture")
             log_event(log, "first successful screenshot", key_id=key.id, contact_ordinal=ordinal)
 
         log_event(

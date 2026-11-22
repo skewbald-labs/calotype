@@ -13,6 +13,7 @@
     python -m calotype.admin refund-credit pi_... [--yes] [--prorated] [--no-stripe]
     python -m calotype.admin remove-email 3            (or an address: every key that holds it)
     python -m calotype.admin tries [--days 7]          (the home page's free tries, per UTC day)
+    python -m calotype.admin funnel [--days 7]         (steps toward a key, per UTC day; see funnel.py)
 
 Keys made here are marked internal and never count as demand-test contacts.
 ``mark-internal`` does the same for a test key made through the website's
@@ -41,6 +42,11 @@ that key. It never prints the address.
 first: every try, those rendered (the count the daily cap applies to), and how
 they ended. The counts are all there is: no URL, host or IP address is stored.
 
+``funnel`` prints the daily funnel counts (``funnel.py``), newest day first,
+with a total row: agents that looked at the MCP tool or called it without a
+key, wrong keys, OAuth probes, misses on key and sign-up paths, refused and
+made keys, and first screenshots. Counts only, like ``tries``.
+
 ``credits`` shows a key's prepaid credit and its purchases. ``refund-credit``
 undoes one purchase, named by its Stripe PaymentIntent id: it takes back the
 credit that is still unused (the pack's size or the key's whole balance,
@@ -62,7 +68,16 @@ from .billing import ALREADY_ENDED, CANCELED, CANCELS_AT_PERIOD_END, BillingProv
 from .config import Settings
 from .credits import credits_for_admin
 from .notices import normalize_email
-from .storage import ApiKey, CreditPurchase, Storage, TryDay, current_day, current_month, open_configured_storage
+from .storage import (
+    FUNNEL_EVENTS,
+    ApiKey,
+    CreditPurchase,
+    Storage,
+    TryDay,
+    current_day,
+    current_month,
+    open_configured_storage,
+)
 
 # Replaced in tests with a provider over a fake Stripe client.
 open_billing = stripe_for_admin
@@ -291,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("tries", help="daily counts of the home page's free tries, newest first")
     t.add_argument("--days", type=_positive_int, default=7, help="how many UTC days to show, today included (default 7)")
 
+    fu = sub.add_parser("funnel", help="daily counts of the steps toward a key (funnel.py), newest first")
+    fu.add_argument("--days", type=_positive_int, default=7, help="how many UTC days to show, today included (default 7)")
+
     args = parser.parse_args(argv)
     settings = Settings.from_env()
     store = open_configured_storage(settings)
@@ -433,6 +451,16 @@ def main(argv: list[str] | None = None) -> int:
         print("day\t" + "\t".join(names))
         for d in store.try_days(days):
             print(d.day + "\t" + "\t".join(str(getattr(d, n)) for n in names))
+        return 0
+
+    if args.cmd == "funnel":
+        today = datetime.now(UTC)
+        days = [current_day(today - timedelta(days=n)) for n in range(args.days)]
+        rows = store.funnel_days(days)
+        print("day\t" + "\t".join(FUNNEL_EVENTS))
+        for d in rows:
+            print(d.day + "\t" + "\t".join(str(getattr(d, e)) for e in FUNNEL_EVENTS))
+        print("total\t" + "\t".join(str(sum(getattr(d, e) for d in rows)) for e in FUNNEL_EVENTS))
         return 0
 
     if args.cmd == "usage":

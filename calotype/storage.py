@@ -40,6 +40,12 @@ The free tries on the home page (``tries.py``) are counted per UTC day
 or the IP address. ``try_admit`` also enforces the daily cap on renders, for
 every instance at once.
 
+The funnel (``funnel.py``) is counted the same way, per UTC day and per step
+(``FunnelDay``): how often an agent looked at the MCP tool without a key,
+called it without one, sent a wrong key, probed for OAuth, looked for a key
+page that does not exist, made a key, and took a key's first screenshot.
+Counts only: never a URL, a key, a user agent or an IP address.
+
 The "contact ordinal" for the demand test is derived, not stored: it is the
 creation order of non-internal keys that have made at least one successful
 screenshot (see ``list_contacts``).
@@ -52,7 +58,7 @@ import re
 import secrets
 import sqlite3
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -175,6 +181,25 @@ class TryDay:
     capped: int = 0  # the day's cap was already reached
 
 
+@dataclass(frozen=True)
+class FunnelDay:
+    """One UTC day's funnel counts (``funnel.py``): counts only, never a URL, key, user agent or IP."""
+
+    day: str  # YYYY-MM-DD, UTC
+    looked: int = 0  # initialize or tools/list on /mcp with no key
+    tool_no_key: int = 0  # tools/call on /mcp with no key: told how to get one
+    bad_key: int = 0  # 401 on /v1/screenshot or /mcp for a key that was sent but is wrong or revoked
+    oauth_probe: int = 0  # a request for OAuth metadata or an OAuth step, whatever the answer
+    key_miss: int = 0  # a 404 or 405 on a path where a key or a sign-up might be (funnel.KEY_MISS_PATHS)
+    key_refused: int = 0  # POST /v1/keys refused: rate limited, bad email, switched off
+    key_made: int = 0  # POST /v1/keys made a key
+    first_capture: int = 0  # a non-internal key's first successful screenshot
+
+
+# The funnel's steps, in order. Each is a FunnelDay field and the name stored for it.
+FUNNEL_EVENTS = tuple(f.name for f in fields(FunnelDay) if f.name != "day")
+
+
 def hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
@@ -255,6 +280,8 @@ class Storage(Protocol):
     def try_admit(self, day: str, limit: int) -> tuple[bool, int]: ...
     def record_try(self, day: str, outcome: str) -> None: ...
     def try_days(self, days: list[str]) -> list[TryDay]: ...
+    def record_funnel(self, day: str, event: str) -> None: ...
+    def funnel_days(self, days: list[str]) -> list[FunnelDay]: ...
 
 
 SCHEMA = """
@@ -325,6 +352,12 @@ CREATE TABLE IF NOT EXISTS tries (
     refused INTEGER NOT NULL DEFAULT 0,
     limited INTEGER NOT NULL DEFAULT 0,
     capped INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS funnel (
+    day TEXT NOT NULL,
+    event TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, event)
 );
 """
 
@@ -793,6 +826,31 @@ class SQLiteStorage:
             ).fetchall() if days else []
         found = {r[0]: TryDay(r[0], *(int(v) for v in r[1:])) for r in rows}
         return [found.get(d, TryDay(d)) for d in days]
+
+    # --- funnel counts (funnel.py) --------------------------------------------------------
+
+    def record_funnel(self, day: str, event: str) -> None:
+        """Add one to the day's count for ``event`` (one of ``FUNNEL_EVENTS``)."""
+        if event not in FUNNEL_EVENTS:
+            raise ValueError(f"unknown funnel event {event!r}")
+        with self._lock:
+            self._db().execute(
+                "INSERT INTO funnel (day, event, count) VALUES (?, ?, 1) "
+                "ON CONFLICT (day, event) DO UPDATE SET count = count + 1",
+                (day, event),
+            )
+
+    def funnel_days(self, days: list[str]) -> list[FunnelDay]:
+        """The counts for each of ``days``, in that order; zeros for a day with none."""
+        with self._lock:
+            rows = self._db().execute(
+                f"SELECT day, event, count FROM funnel WHERE day IN ({', '.join('?' * len(days))})", days
+            ).fetchall() if days else []
+        found: dict[str, dict[str, int]] = {}
+        for day, event, count in rows:
+            if event in FUNNEL_EVENTS:  # a step since renamed or dropped is not shown
+                found.setdefault(day, {})[event] = int(count)
+        return [FunnelDay(d, **found.get(d, {})) for d in days]
 
     def _tries_rendered_locked(self, day: str) -> int:
         row = self._db().execute("SELECT rendered FROM tries WHERE day = ?", (day,)).fetchone()

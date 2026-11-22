@@ -467,3 +467,34 @@ def test_record_try_counts_total_and_outcome(store):
         TryDay("2026-11-18"),
     ]
     assert store.try_days([]) == []
+
+
+# --- funnel: per-day counts of the steps toward a key (funnel.py) ---------------------------
+
+
+def test_record_funnel_counts_each_step_per_day(store):
+    from calotype.storage import FUNNEL_EVENTS, FunnelDay
+
+    for event in ("looked", "looked", "tool_no_key", "key_made", "first_capture"):
+        store.record_funnel("2026-11-20", event)
+    store.record_funnel("2026-11-19", "oauth_probe")
+    with pytest.raises(ValueError):
+        store.record_funnel("2026-11-20", "day")
+    with pytest.raises(ValueError):
+        store.record_funnel("2026-11-20", "something_else")
+    assert store.funnel_days(["2026-11-20", "2026-11-19", "2026-11-18"]) == [
+        FunnelDay("2026-11-20", looked=2, tool_no_key=1, key_made=1, first_capture=1),
+        FunnelDay("2026-11-19", oauth_probe=1),
+        FunnelDay("2026-11-18"),
+    ]
+    assert store.funnel_days([]) == []
+    for event in FUNNEL_EVENTS:  # every step is a field that can be counted
+        store.record_funnel("2026-11-17", event)
+    assert store.funnel_days(["2026-11-17"])[0] == FunnelDay("2026-11-17", **{e: 1 for e in FUNNEL_EVENTS})
+
+
+def test_parallel_funnel_counts_are_all_kept(store):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: store.record_funnel("2026-11-20", "looked"), range(24)))
+    assert store.funnel_days(["2026-11-20"])[0].looked == 24
+

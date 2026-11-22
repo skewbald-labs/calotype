@@ -42,6 +42,10 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     ``rendered`` and one count per outcome. Never a URL, host or IP address.
     ``rendered`` is the shared daily cap, taken by ``try_admit`` exactly as
     ``try_consume`` takes a key's quota (below).
+``{prefix}funnel/{YYYY-MM-DD}``
+    The funnel counts of one UTC day (``storage.FunnelDay``, ``funnel.py``):
+    ``day`` and one count per step that happened that day. Each step is one
+    ``Increment`` write. Never a URL, key, user agent or IP address.
 
 No name, IP address or URL is stored; an email address only if the key's
 holder gave one, on the key's own document.
@@ -102,10 +106,12 @@ from .storage import (
     NOTICE_PENDING,
     REF_LABEL_PREFIX,
     REF_TAG,
+    FUNNEL_EVENTS,
     TRY_OUTCOMES,
     ApiKey,
     Contact,
     CreditPurchase,
+    FunnelDay,
     Notice,
     TryDay,
     generate_key,
@@ -138,6 +144,7 @@ class FirestoreStorage:
         self._purchases = self._client.collection(f"{collection_prefix}credit_purchases")
         self._notices = self._client.collection(f"{collection_prefix}notices")
         self._tries = self._client.collection(f"{collection_prefix}tries")
+        self._funnel = self._client.collection(f"{collection_prefix}funnel")
 
     # --- plumbing -----------------------------------------------------------------
 
@@ -151,7 +158,7 @@ class FirestoreStorage:
         """The collections this store writes to (used by tests and cleanup)."""
         return [
             self._keys, self._usage, self._counter.parent, self._events,
-            self._credits, self._purchases, self._notices, self._tries,
+            self._credits, self._purchases, self._notices, self._tries, self._funnel,
         ]
 
     @staticmethod
@@ -587,6 +594,23 @@ class FirestoreStorage:
                 doc = snap.to_dict()
                 found[snap.id] = TryDay(snap.id, **{n: int(doc.get(n) or 0) for n in names})
         return [found.get(d, TryDay(d)) for d in days]
+
+    # --- funnel counts (funnel.py) --------------------------------------------------------
+
+    def record_funnel(self, day: str, event: str) -> None:
+        """Add one to the day's count for ``event`` (one of ``FUNNEL_EVENTS``), in one write."""
+        if event not in FUNNEL_EVENTS:
+            raise ValueError(f"unknown funnel event {event!r}")
+        self._funnel.document(day).set({"day": day, event: firestore.Increment(1)}, merge=True)
+
+    def funnel_days(self, days: list[str]) -> list[FunnelDay]:
+        """The counts for each of ``days``, in that order; zeros for a day with none."""
+        found = {}
+        for snap in self._client.get_all([self._funnel.document(d) for d in days]):
+            if snap.exists:
+                doc = snap.to_dict()
+                found[snap.id] = FunnelDay(snap.id, **{e: int(doc.get(e) or 0) for e in FUNNEL_EVENTS})
+        return [found.get(d, FunnelDay(d)) for d in days]
 
     # --- contacts -----------------------------------------------------------------------
 
