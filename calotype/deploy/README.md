@@ -94,6 +94,10 @@ python -m calotype.admin refund-credit pi_... --yes --no-stripe   # credit only;
 
 It needs `STRIPE_SECRET_KEY` and the storage settings in the environment, like `revoke-key`. The credit goes first, then the money: the purchase is marked refunded and its unused credit removed in one step (the pack's size or the key's whole balance, whichever is smaller; screenshots already taken stay taken), then Stripe refunds the PaymentIntent with the idempotency key `calotype_credit_refund_<pi id>`. If Stripe fails, run the same command again: the credit is not taken twice and the money is not returned twice. A refund made in the Dashboard does not touch the credit; follow it with `refund-credit pi_... --yes --no-stripe`.
 
+## Quota emails
+
+Off unless you pass `--email-notices`. It adds the secret `calotype-email-token-secret` (env `EMAIL_TOKEN_SECRET_NAME`) as `CALOTYPE_EMAIL_TOKEN_SECRET`, next to the Stripe ones. Pass it on every deploy once it is on: `gcloud run deploy --set-secrets` replaces the whole list, so a deploy without the flag would remove it. The skewbald-checks job in free-reign (`ops/checks`) reads the same secret to sign the links it sends. Create it once from stdin, with a random value of at least 32 characters, and grant the service's and the job's accounts access to it only (see below).
+
 ## IAM roles
 
 ### Deployer: the person or CI account running `deploy.sh`
@@ -127,6 +131,7 @@ Simplest is to have a project Owner do the first run once, then deploy with `--s
 |---|---|---|
 | `roles/datastore.user` | project | read and write the Firestore documents (keys, usage counts, processed Stripe events, prepaid credit and purchases) |
 | `roles/secretmanager.secretAccessor` | `calotype-stripe-secret-key` and `calotype-stripe-webhook-secret` only, not the project (`--stripe` only) | Cloud Run resolves the two secret references at start |
+| `roles/secretmanager.secretAccessor` | `calotype-email-token-secret` only (`--email-notices` only) | the same, for the quota-email link secret |
 
 Nothing else. Cloud Run sends stdout to Cloud Logging without a logging role, and the image is pulled by Cloud Run's own service agent. Do not use the Compute Engine default account; `deploy.sh` refuses it.
 

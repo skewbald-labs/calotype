@@ -1,0 +1,25 @@
+  <form class="try" id="try-form" method="post" action="/try">
+    <label for="try-url">Try it: paste the address of any public page</label>
+    <div class="tryrow">
+      <input id="try-url" name="url" type="text" inputmode="url" autocomplete="url" spellcheck="false" maxlength="2048" required placeholder="https://example.com" value="">
+      <button type="submit">Take a screenshot</button>
+    </div>
+    <p class="muted">Free tries: TRIES_PER_IP an hour, TRIES_PER_DAY a day for everyone, no key. 1280 × 800, JPEG. The address and the image are not kept.</p>
+  </form>
+<script>
+  // Plain form; this only stops a second click while the first capture runs.
+  (function () {
+    var form = document.getElementById("try-form");
+    if (!form) return;
+    var btn = form.querySelector("button");
+    var label = btn.textContent;
+    form.addEventListener("submit", function () {
+      btn.disabled = true;
+      btn.textContent = "Taking the screenshot…";
+    });
+    window.addEventListener("pageshow", function () {
+      btn.disabled = false;
+      btn.textContent = label;
+    });
+  })();
+</script>

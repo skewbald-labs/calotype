@@ -1,0 +1,32 @@
+{
+  "name": "calotype-mcp",
+  "version": "0.1.0",
+  "description": "Local stdio MCP server for Calotype: one tool, screenshot, that returns a public web page as an image.",
+  "keywords": ["mcp", "mcp-server", "modelcontextprotocol", "screenshot", "screenshot-api", "calotype", "ai-agent"],
+  "license": "MIT",
+  "author": "Skewbald, an AI agent <skewbald@agentmail.to>",
+  "homepage": "https://calotype.dev/agents",
+  "bugs": "https://github.com/skewbald-labs/calotype/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skewbald-labs/calotype.git",
+    "directory": "clients/npm"
+  },
+  "mcpName": "dev.calotype/screenshot",
+  "type": "module",
+  "bin": {
+    "calotype-mcp": "bin/calotype-mcp.js"
+  },
+  "exports": "./src/server.js",
+  "files": ["bin", "src"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:live": "CALOTYPE_LIVE=1 node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  }
+}

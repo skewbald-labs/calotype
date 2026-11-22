@@ -11,6 +11,8 @@
     python -m calotype.admin contacts
     python -m calotype.admin credits 3
     python -m calotype.admin refund-credit pi_... [--yes] [--prorated] [--no-stripe]
+    python -m calotype.admin remove-email 3            (or an address: every key that holds it)
+    python -m calotype.admin tries [--days 7]          (the home page's free tries, per UTC day)
 
 Keys made here are marked internal and never count as demand-test contacts.
 ``mark-internal`` does the same for a test key made through the website's
@@ -25,10 +27,19 @@ command refuses, unless ``--no-stripe`` is given: then the key is revoked and
 the subscription has to be cancelled by hand in the Stripe dashboard.
 
 ``delete-key`` is for a key holder who asks for their record to be deleted
-(see the privacy notice). It deletes the key's record and its usage counts,
-for good, after cancelling a paid key's subscription as ``revoke-key`` does.
+(see the privacy notice). It deletes the key's record (with its email address,
+if it has one), its usage counts and its quota notices, for good, after cancelling a paid key's subscription as ``revoke-key`` does.
 Without ``--yes`` it only prints what it would delete. ``key-id`` reads a key
 from standard input, so it stays out of the shell history, and prints its id.
+Revoking a key also removes its email address.
+
+``remove-email`` is for a holder who replies "stop" to a quota notice: given
+an address, it removes it from every key that holds it; given a key id, from
+that key. It never prints the address.
+
+``tries`` prints the daily counts of the home page's free tries, newest day
+first: every try, those rendered (the count the daily cap applies to), and how
+they ended. The counts are all there is: no URL, host or IP address is stored.
 
 ``credits`` shows a key's prepaid credit and its purchases. ``refund-credit``
 undoes one purchase, named by its Stripe PaymentIntent id: it takes back the
@@ -45,11 +56,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import UTC, datetime, timedelta
 
 from .billing import ALREADY_ENDED, CANCELED, CANCELS_AT_PERIOD_END, BillingProviderError, stripe_for_admin
 from .config import Settings
 from .credits import credits_for_admin
-from .storage import ApiKey, CreditPurchase, Storage, current_month, open_configured_storage
+from .notices import normalize_email
+from .storage import ApiKey, CreditPurchase, Storage, TryDay, current_day, current_month, open_configured_storage
 
 # Replaced in tests with a provider over a fake Stripe client.
 open_billing = stripe_for_admin
@@ -214,6 +227,13 @@ def _add_stripe_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _positive_int(text: str) -> int:
+    n = int(text)
+    if not 1 <= n <= 366:
+        raise argparse.ArgumentTypeError("give a number of days from 1 to 366")
+    return n
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m calotype.admin", description="Manage Calotype API keys.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -264,6 +284,12 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument(
         "--no-stripe", action="store_true", help="do not touch Stripe; the money must then be refunded by hand"
     )
+
+    e = sub.add_parser("remove-email", help="remove the quota-notice address from a key id, or from every key with an address")
+    e.add_argument("target", help="a key id, or an email address")
+
+    t = sub.add_parser("tries", help="daily counts of the home page's free tries, newest first")
+    t.add_argument("--days", type=_positive_int, default=7, help="how many UTC days to show, today included (default 7)")
 
     args = parser.parse_args(argv)
     settings = Settings.from_env()
@@ -320,7 +346,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.yes:
             print("Would delete, for good:", file=sys.stderr)
             print(f"  the record of {describe_key(key)}", file=sys.stderr)
-            print("  all of its monthly usage counts", file=sys.stderr)
+            print("  all of its monthly usage counts and quota notices", file=sys.stderr)
+            if key.email:
+                print("  its email address for quota notices", file=sys.stderr)
             credit, purchases = store.get_credit_balance(key.id), store.list_credit_purchases(key.id)
             if credit or purchases:
                 print(
@@ -337,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         if not end_subscription(key, at_period_end=args.at_period_end, no_stripe=args.no_stripe, action="delete"):
             return 1
         store.delete_key(key.id)
-        print(f"deleted key {key.id} and its usage counts", file=sys.stderr)
+        print(f"deleted key {key.id}, its usage counts, its notices and any email address", file=sys.stderr)
         if key.stripe_customer_id or sub_id:
             print(STRIPE_RECORDS_NOTE, file=sys.stderr)
         return 0
@@ -378,6 +406,34 @@ def main(argv: list[str] | None = None) -> int:
         ok = store.set_plan(args.key_id, args.plan)
         print("updated" if ok else "no key with that id", file=sys.stderr)
         return 0 if ok else 1
+
+    if args.cmd == "remove-email":
+        target = args.target.strip()
+        if "@" in target:
+            email = normalize_email(target)
+            ids = store.keys_with_email(email) if email else []
+        elif target.isdigit():
+            key = store.get_key_by_id(int(target))
+            ids = [key.id] if key is not None and key.email else []
+        else:
+            print("give a key id or an email address", file=sys.stderr)
+            return 2
+        for key_id in ids:
+            store.set_email(key_id, None)
+        if not ids:
+            print("no key holds that address" if "@" in target else "that key has no address", file=sys.stderr)
+            return 1
+        print(f"removed the address from key(s) {', '.join(map(str, ids))}", file=sys.stderr)
+        return 0
+
+    if args.cmd == "tries":
+        today = datetime.now(UTC)
+        days = [current_day(today - timedelta(days=n)) for n in range(args.days)]
+        names = [f for f in TryDay.__dataclass_fields__ if f != "day"]
+        print("day\t" + "\t".join(names))
+        for d in store.try_days(days):
+            print(d.day + "\t" + "\t".join(str(getattr(d, n)) for n in names))
+        return 0
 
     if args.cmd == "usage":
         month = current_month()

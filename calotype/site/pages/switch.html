@@ -1,8 +1,9 @@
   <h1>Switching to Calotype</h1>
-  <p class="lede">Calotype does one job: a public page address goes in, an image of the page comes back, by HTTP or as one MCP tool call. This page maps other screenshot APIs' parameters to Calotype's and compares prices. It also says where other services do more.</p>
+  <p class="lede">Calotype does one job: a public page address goes in, an image of the page comes back, by HTTP or as one MCP tool call. This page is the overview: it maps other screenshot APIs' parameters to Calotype's, compares prices, and says where other services do more. Each alternative also has <a href="#pages">a page of its own</a>.</p>
 
   <ul class="toc">
     <li><a href="#fit">Is it a fit?</a></li>
+    <li><a href="#pages">One page per alternative</a></li>
     <li><a href="#prices">Prices per 1,000</a></li>
     <li><a href="#params">Parameter names</a></li>
     <li><a href="#example">One request, converted</a></li>
@@ -22,8 +23,20 @@
   </ul>
   <p>Calotype does not fit when you need PDF, HTML input, video, Markdown, cookies or headers for logged-in pages, proxies, element capture, or pages on a private network. Stay with a service that has them. The list is <a href="#more">below</a>.</p>
 
+  <h2 id="pages">One page per alternative</h2>
+  <p>Each page has both sides' prices, the parameter mapping, one request before and after, what the other service does that Calotype does not, and when to stay with it.</p>
+  <ul>
+    <li><a href="/switch/screenshotone">Switching from ScreenshotOne</a></li>
+    <li><a href="/switch/urlbox">Switching from Urlbox</a></li>
+    <li><a href="/switch/screenshotapi-net">Switching from ScreenshotAPI.net</a></li>
+    <li><a href="/switch/allscreenshots">Switching from Allscreenshots</a></li>
+    <li><a href="/switch/apiflash">Switching from ApiFlash</a></li>
+    <li><a href="/switch/playwright-mcp">Playwright MCP or Calotype</a>, for agents that have a browser of their own</li>
+  </ul>
+  <p>For MCP servers side by side, see <a href="/compare/screenshot-mcp-servers">Screenshot MCP servers compared</a>.</p>
+
   <h2 id="prices">Prices per 1,000 screenshots</h2>
-  <p>Each service's first paid plan, billed monthly, in US dollars. Calotype read these figures from each seller's own page on 19 November 2026. Prices change, so check the linked page before you decide.</p>
+  <p>Each service's first paid plan, billed monthly, in US dollars. Calotype read these figures from each seller's own page on 21 November 2026. Prices change, so check the linked page before you decide.</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>Service</th><th>First paid plan</th><th>Per 1,000</th><th>Free use</th></tr></thead>
@@ -37,10 +50,10 @@
     </tbody>
   </table>
   </div>
-  <p class="muted">Per 1,000 is the plan price divided by its included screenshots. Some services charge extra credits for proxies, GPU rendering or long renders, as their pages explain. At higher volume Calotype is not the cheapest. Its largest plan is Pro: $49 for 25,000, $1.96 per 1,000. ScreenshotAPI.net's Growth plan is $69 for 40,000, $1.73 per 1,000. Above 25,000 a month, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
+  <p class="muted">Per 1,000 is the plan price divided by its included screenshots. Some services charge extra credits for proxies, GPU rendering or long renders, as their pages explain. At higher volume Calotype is not the cheapest. Its largest plan is Pro: $49 for 25,000, $1.96 per 1,000. ScreenshotAPI.net's Growth plan is $69 for 40,000, $1.73 per 1,000, and ApiFlash's Large plan is $180 for 100,000, $1.80 per 1,000. Calotype's first plan is not the lowest in dollars either: ApiFlash starts at $7, Allscreenshots at $10, ScreenshotAPI.net at $15 and ScreenshotOne at $17. Above 25,000 a month, write to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
 
   <h2 id="params">Parameter names</h2>
-  <p>Calotype's names on the left, then the closest name in each other API, read from each API's documentation on 19 November 2026. Calotype refuses a parameter it does not know with <code>invalid_parameters</code>, so a name carried over by mistake fails loudly instead of being ignored. The full list is in the <a href="/docs#parameters">docs</a>.</p>
+  <p>Calotype's names on the left, then the closest name in each other API, read from each API's documentation on 21 November 2026. Calotype refuses a parameter it does not know with <code>invalid_parameters</code>, so a name carried over by mistake fails loudly instead of being ignored. The full list is in the <a href="/docs#parameters">docs</a>.</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>Calotype</th><th>ScreenshotOne</th><th>Urlbox</th><th>ApiFlash</th><th>ScreenshotAPI.net</th><th>Allscreenshots</th></tr></thead>
@@ -82,24 +95,25 @@
   </ul>
 
   <h2 id="more">Where others do more</h2>
-  <p>These are things other services offer and Calotype does not, as their own pages showed on 19 November 2026:</p>
+  <p>These are things other services offer and Calotype does not, as their own pages showed on 21 November 2026:</p>
   <ul>
-    <li><strong>Other outputs:</strong> PDF (ScreenshotOne, Urlbox, ScreenshotAPI.net, Allscreenshots), HTML to image (ScreenshotOne, ScreenshotAPI.net), Markdown (ScreenshotOne, Urlbox) and video (ScreenshotOne, Urlbox, ScreenshotAPI.net).</li>
-    <li><strong>Pages behind a login:</strong> sending cookies or headers with the request (ScreenshotAPI.net, Allscreenshots).</li>
-    <li><strong>Cleaner shots:</strong> hiding cookie banners (ScreenshotOne, Urlbox, ApiFlash, ScreenshotAPI.net), CSS and JavaScript injection, and element capture.</li>
-    <li><strong>Network options:</strong> proxies and a choice of IP location.</li>
+    <li><strong>Other outputs:</strong> PDF (ScreenshotOne, Urlbox, ScreenshotAPI.net, Allscreenshots), HTML to image (ScreenshotOne, Urlbox, ScreenshotAPI.net), Markdown (ScreenshotOne, Urlbox, ScreenshotAPI.net, Allscreenshots) and video (ScreenshotOne, Urlbox, ScreenshotAPI.net).</li>
+    <li><strong>Pages behind a login:</strong> sending cookies or headers with the request (all five).</li>
+    <li><strong>Interaction:</strong> clicking, typing or scrolling before the capture (Allscreenshots, ScreenshotAPI.net).</li>
+    <li><strong>Cleaner shots:</strong> hiding cookie banners (all five), CSS and JavaScript injection, and element capture.</li>
+    <li><strong>Network options:</strong> proxies, a choice of IP location, and stealth modes for sites that block automated browsers.</li>
     <li><strong>Delivery:</strong> upload to S3, caching, webhooks, and no-code integrations such as Zapier and Make.</li>
     <li><strong>MCP sign-in by OAuth:</strong> ScreenshotOne, Urlbox and Allscreenshots run remote MCP servers that sign in with OAuth. Calotype takes a key in a header only.</li>
     <li><strong>Track record:</strong> Urlbox says it has operated for over a decade. Calotype started in November 2026.</li>
   </ul>
 
   <h2 id="playwright">Calotype or Playwright?</h2>
-  <p>Many agents get a browser through <a href="https://github.com/microsoft/playwright-mcp">Playwright MCP</a>. Its README, read on 19 November 2026, asks for Node.js 20 or newer. The server is started with <code>npx @playwright/mcp@latest</code>, and its browser runs on the same machine, or in the project's Docker image.</p>
+  <p>Many agents get a browser through <a href="https://github.com/microsoft/playwright-mcp">Playwright MCP</a>, which is free and is usually the better tool for a coding agent on its own machine. Its README, read on 21 November 2026, asks for Node.js 20 or newer. The server is started with <code>npx @playwright/mcp@latest</code>, and its browser runs on the same machine, or in the project's Docker image.</p>
   <ul>
     <li><strong>Use Playwright</strong> when the agent runs on a machine that can run a browser, when it needs to click, type or log in, or when the page is private: <code>localhost</code>, a staging site, anything behind a login. Calotype cannot reach those.</li>
     <li><strong>Use Calotype</strong> when there is no browser to install: hosted agents, cloud sandboxes, n8n, serverless functions. Also use it when a browser is too heavy for the container, or when one look at a public page is all the agent needs.</li>
   </ul>
-  <p>The two work side by side: Playwright for your own app, Calotype for public pages. Setup for each client is on <a href="/agents">For agents</a>.</p>
+  <p>The two work side by side: Playwright for your own app, Calotype for public pages. The longer comparison is <a href="/switch/playwright-mcp">Playwright MCP or Calotype</a>. Setup for each client is on <a href="/agents">For agents</a>. If you write Playwright yourself, <a href="/guides/playwright-python-screenshots">Playwright screenshots in Python, and where they break</a> has tested fixes for the usual failures.</p>
 
   <h2 id="feedback">Tell us what is missing</h2>
   <p>If you tried Calotype and something stopped you from switching, write it down: what you needed, what you used instead, and what would have made Calotype work for you. Send it to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>. A written review earns your key one month on Starter's quota (5,000 screenshots), free. Name the key by the <code>key_ref</code> that <a href="/docs#usage">GET /v1/usage</a> returns. Never send your key.</p>

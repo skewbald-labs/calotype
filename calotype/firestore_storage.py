@@ -14,7 +14,8 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     ``label``, ``created_at`` (ISO 8601, UTC), ``revoked_at`` (null or ISO
     8601), ``internal`` (bool), ``successful_screenshots`` (int),
     ``stripe_customer_id`` and ``stripe_subscription_id`` (null until the key
-    pays; documents written before these fields existed simply lack them).
+    pays; documents written before these fields existed simply lack them),
+    and ``email`` (null unless the holder gave an address for quota notices).
 ``{prefix}usage/{id}_{YYYY-MM}``
     ``key_id``, ``month``, ``count``: screenshots counted this month.
 ``{prefix}meta/key_ids``
@@ -30,8 +31,20 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     ``screenshots``, ``amount_cents``, ``currency``, ``challenge_id``,
     ``method``, ``created_at``, ``refunded_at``, ``credits_removed``,
     ``refund_id``.
+``{prefix}notices/{id}_{YYYY-MM}_{threshold}``
+    A quota notice (``storage.Notice``), queued by the service with
+    ``create``, so a key gets at most one per month and threshold. The
+    skewbald-checks job (free-reign ``ops/checks``) reads the pending ones,
+    sends them, and sets ``status``, ``sent_at`` and ``to_hash`` (a keyed
+    hash of the address, for its per-address monthly cap). Never the address.
+``{prefix}tries/{YYYY-MM-DD}``
+    The free tries of one UTC day (``storage.TryDay``): ``day``, ``total``,
+    ``rendered`` and one count per outcome. Never a URL, host or IP address.
+    ``rendered`` is the shared daily cap, taken by ``try_admit`` exactly as
+    ``try_consume`` takes a key's quota (below).
 
-No email, name, IP address or URL is stored.
+No name, IP address or URL is stored; an email address only if the key's
+holder gave one, on the key's own document.
 
 Counters change through Firestore's atomic ``Increment`` transform, which
 the server applies in order and which returns the value it produced. That
@@ -76,6 +89,7 @@ automatically, so no composite index has to be deployed.
 from __future__ import annotations
 
 import time
+from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from typing import Any
 
@@ -85,11 +99,15 @@ from google.cloud.firestore import FieldFilter
 
 from .storage import (
     KEY_REF,
+    NOTICE_PENDING,
     REF_LABEL_PREFIX,
     REF_TAG,
+    TRY_OUTCOMES,
     ApiKey,
     Contact,
     CreditPurchase,
+    Notice,
+    TryDay,
     generate_key,
     hash_key,
     source_from_label,
@@ -118,6 +136,8 @@ class FirestoreStorage:
         self._events = self._client.collection(f"{collection_prefix}stripe_events")
         self._credits = self._client.collection(f"{collection_prefix}credits")
         self._purchases = self._client.collection(f"{collection_prefix}credit_purchases")
+        self._notices = self._client.collection(f"{collection_prefix}notices")
+        self._tries = self._client.collection(f"{collection_prefix}tries")
 
     # --- plumbing -----------------------------------------------------------------
 
@@ -129,7 +149,10 @@ class FirestoreStorage:
 
     def collections(self) -> list[Any]:
         """The collections this store writes to (used by tests and cleanup)."""
-        return [self._keys, self._usage, self._counter.parent, self._events, self._credits, self._purchases]
+        return [
+            self._keys, self._usage, self._counter.parent, self._events,
+            self._credits, self._purchases, self._notices, self._tries,
+        ]
 
     @staticmethod
     def _increment(ref, field: str, by: int, *, create: dict | None = None) -> int:
@@ -153,7 +176,9 @@ class FirestoreStorage:
 
     # --- keys -------------------------------------------------------------------------
 
-    def create_key(self, plan: str, label: str = "", *, internal: bool = False) -> tuple[str, ApiKey]:
+    def create_key(
+        self, plan: str, label: str = "", *, internal: bool = False, email: str | None = None
+    ) -> tuple[str, ApiKey]:
         raw = generate_key()
         key_hash = hash_key(raw)
         now = datetime.now(UTC).isoformat(timespec="seconds")
@@ -170,9 +195,10 @@ class FirestoreStorage:
                 "successful_screenshots": 0,
                 "stripe_customer_id": None,
                 "stripe_subscription_id": None,
+                "email": email,
             }
         )
-        return raw, ApiKey(key_id, plan, label, now, False, internal, 0)
+        return raw, ApiKey(key_id, plan, label, now, False, internal, 0, email=email)
 
     def get_key(self, raw_key: str) -> ApiKey | None:
         docs = list(self._keys.where(filter=FieldFilter("key_hash", "==", hash_key(raw_key))).limit(1).stream())
@@ -190,15 +216,16 @@ class FirestoreStorage:
             snap = ref.get(transaction=t)
             if not snap.exists or snap.get("revoked_at") is not None:
                 return False
-            t.update(ref, {"revoked_at": now})
+            t.update(ref, {"revoked_at": now, "email": None})  # a revoked key keeps no address
             return True
 
         return revoke(self._client.transaction())
 
     def delete_key(self, key_id: int) -> bool:
-        """Delete the key's document, usage documents, credit and purchase records. False if there was no such key.
+        """Delete the key's document (with its email address), its usage and notice documents,
+        and its credit and purchase records.
 
-        The other documents go first, so a run cut short leaves the key document
+        False if there was no such key. The other documents go first, so a run cut short leaves the key document
         to find and delete again. The counter in ``meta/key_ids`` is not
         lowered, so the id is never handed out again.
         """
@@ -206,10 +233,11 @@ class FirestoreStorage:
         exists = ref.get().exists
         usage = self._usage.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()
         purchases = self._purchases.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()
+        notices = self._notices.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()
         batch = self._client.batch()
         batch.delete(self._credit_ref(key_id))
         pending = 1
-        for doc in [*usage, *purchases]:
+        for doc in [*usage, *purchases, *notices]:
             batch.delete(doc.reference)
             pending += 1
             if pending == 400:  # a batch takes at most 500 writes
@@ -493,6 +521,73 @@ class FirestoreStorage:
 
         return record(self._client.transaction())
 
+    # --- the optional email address and quota notices ----------------------------------
+
+    def set_email(self, key_id: int, email: str | None) -> bool:
+        """Set, replace or (with None) remove the key's address. False if there is no such key."""
+        try:
+            self._key_ref(key_id).update({"email": email})
+        except NotFound:
+            return False
+        return True
+
+    def keys_with_email(self, email: str) -> list[int]:
+        docs = self._keys.where(filter=FieldFilter("email", "==", email)).stream()
+        return sorted(int(d.get("id")) for d in docs)
+
+    def queue_notice(self, notice: Notice) -> bool:
+        """Record a pending notice. False if this key, month and threshold already has one."""
+        data = asdict(notice)
+        data["status"] = NOTICE_PENDING
+        data["created_at"] = notice.created_at or datetime.now(UTC).isoformat(timespec="seconds")
+        try:
+            self._notices.document(notice.id).create(data)
+        except AlreadyExists:
+            return False
+        return True
+
+    def list_notices(self, key_id: int) -> list[Notice]:
+        docs = [d.to_dict() for d in self._notices.where(filter=FieldFilter("key_id", "==", int(key_id))).stream()]
+        names = {f.name for f in fields(Notice)}
+        notices = [Notice(**{k: v for k, v in d.items() if k in names}) for d in docs]
+        return sorted(notices, key=lambda n: (n.month, n.threshold))
+
+    # --- free tries (tries.py) -----------------------------------------------------------
+
+    def try_admit(self, day: str, limit: int) -> tuple[bool, int]:
+        """Atomically add one to the day's ``rendered`` count if it is under ``limit``.
+
+        The same read, increment and undo as ``try_consume``, so instances
+        sharing the database never let more than ``limit`` through in a day.
+        """
+        ref = self._tries.document(day)
+        snap = ref.get()
+        rendered = int(snap.get("rendered") or 0) if snap.exists else 0
+        if rendered >= limit:  # also covers limit <= 0; no write
+            return False, rendered
+        count = self._increment(ref, "rendered", 1, create={"day": day})
+        if count <= limit:
+            return True, count
+        return False, min(self._increment(ref, "rendered", -1), limit)
+
+    def record_try(self, day: str, outcome: str) -> None:
+        """Count one try and how it ended (one of ``TRY_OUTCOMES``), in one write."""
+        if outcome not in TRY_OUTCOMES:
+            raise ValueError(f"unknown try outcome {outcome!r}")
+        self._tries.document(day).set(
+            {"day": day, "total": firestore.Increment(1), outcome: firestore.Increment(1)}, merge=True
+        )
+
+    def try_days(self, days: list[str]) -> list[TryDay]:
+        """The counts for each of ``days``, in that order; zeros for a day with no tries."""
+        names = [f.name for f in fields(TryDay) if f.name != "day"]
+        found = {}
+        for snap in self._client.get_all([self._tries.document(d) for d in days]):
+            if snap.exists:
+                doc = snap.to_dict()
+                found[snap.id] = TryDay(snap.id, **{n: int(doc.get(n) or 0) for n in names})
+        return [found.get(d, TryDay(d)) for d in days]
+
     # --- contacts -----------------------------------------------------------------------
 
     def list_contacts(self) -> list[Contact]:
@@ -570,4 +665,5 @@ def _doc_to_key(d: dict) -> ApiKey:
         successful_screenshots=int(d.get("successful_screenshots", 0)),
         stripe_customer_id=d.get("stripe_customer_id"),
         stripe_subscription_id=d.get("stripe_subscription_id"),
+        email=d.get("email"),
     )

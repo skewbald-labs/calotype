@@ -8,14 +8,16 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 
 | Path | What it is |
 |---|---|
-| `app.py` | FastAPI app: `/v1/screenshot` (GET and POST), `/v1/keys`, `/v1/usage`, `/v1/plans`, `/v1/billing/*`, `/v1/credits`, `/health` (also `/healthz`; Cloud Run keeps `/healthz` for itself on run.app addresses), and the website (`pages.py`) |
+| `app.py` | FastAPI app: `/v1/screenshot` (GET and POST), `/v1/keys`, `/v1/keys/email`, `/v1/usage`, `/v1/plans`, `/v1/billing/*`, `/v1/credits`, `/health` (also `/healthz`; Cloud Run keeps `/healthz` for itself on run.app addresses), and the website (`pages.py`) |
 | `capture.py` | One Chromium, a fresh context per capture, a semaphore for concurrency |
 | `egress.py` | The per-capture forward proxy that is Chromium's only route to the network |
 | `ssrf.py` | The address rule: what may be fetched |
 | `params.py` | Request parameters and limits |
 | `storage.py` | The `Storage` interface, and keys (hashed) and usage counts in SQLite |
 | `firestore_storage.py` | The same `Storage` in Google Cloud Firestore, for Cloud Run (`CALOTYPE_STORAGE=firestore`) |
-| `ratelimit.py` | In-memory limit on self-serve key creation |
+| `ratelimit.py` | In-memory per-IP limits on self-serve key creation and free tries |
+| `tries.py` | `/try`: the home page's free try, a screenshot with no key (form in `site/try-form.html`) |
+| `notices.py` | The optional email address on a key, and the 80% and 100% quota notices: validation, masking, the signed removal link |
 | `billing.py` | Stripe Checkout, customer portal and webhook handling (off unless the Stripe variables are set) |
 | `credits.py` | Prepaid screenshots bought by an agent through Stripe machine payments, `POST /v1/credits` (off unless `CALOTYPE_CREDITS=1` and its settings are set) |
 | `mpp.py` | The Machine Payments Protocol's wire format: the 402 challenge, the credential, the receipt |
@@ -23,9 +25,10 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 | `admin.py` | Key administration CLI |
 | `remote_mcp.py` | Remote MCP server at `/mcp` (streamable HTTP) with one tool, `screenshot` |
 | `mcp_server.py` | Local MCP server (stdio) that calls the API |
+| `install_links.py` | Builds the one-click Cursor and VS Code install links in the README and on `/agents`; `python -m calotype.install_links` prints them with their decoded configs |
 | `plans.json` | Plans and monthly quotas, and the prepaid packs (`credit_packs`). Prices are provisional |
 | `adblock_domains.txt` | Domains blocked when `block_ads=true` |
-| `pages.py`, `site/` | The public website: `site/layout.html` (shared header and footer) wraps each page in `site/pages/`; `pages.py` lists the routes (`/`, `/docs`, `/pricing`, `/acceptable-use`, `/privacy`, `/terms`, `/refunds`) and serves them with `/robots.txt` and `/sitemap.xml` |
+| `pages.py`, `site/` | The public website: `site/layout.html` (shared header and footer) wraps each page in `site/pages/`; `pages.py` lists the routes (`/`, `/docs`, `/pricing`, `/acceptable-use`, `/privacy`, `/terms`, `/refunds`) and serves them with `/robots.txt` and `/sitemap.xml`, the logo files in `site/brand/` at `/icon.svg` and `/icon.png`, and `site/images/` at `/images/<name>` (the README links there, so add a new name rather than replacing a file) |
 | `tests/` | pytest suite |
 
 ## Run locally
@@ -163,15 +166,17 @@ The only way past the rule is `AddressPolicy.exceptions`, a set of exact `(ip, p
 ## Keys, privacy and the demand-test contacts
 
 - **Self-serve keys.** `POST /v1/keys`, or the button on the landing page, creates a free-plan key and returns it once. It asks for nothing: no email, no name, no account.
-- **What is stored.** In either backend (SQLite or Firestore), for each key: the SHA-256 hash (never the key), plan, creation time, an `internal` flag, an optional operator label (CLI keys only), a lifetime count of successful screenshots, per-month usage counts, a revocation time, and, once a key has paid, its Stripe customer id and subscription id. Also the ids of Stripe events already handled. For prepaid credit: the key's balance, and per purchase the Stripe PaymentIntent id, pack, amount and times. No IP address, email or name is stored anywhere (Stripe holds the buyer's details), and logs carry no IPs.
+- **What is stored.** In either backend (SQLite or Firestore), for each key: the SHA-256 hash (never the key), plan, creation time, an `internal` flag, an optional operator label (CLI keys only), a lifetime count of successful screenshots, per-month usage counts, a revocation time, and, once a key has paid, its Stripe customer id and subscription id. Also the ids of Stripe events already handled. For prepaid credit: the key's balance, and per purchase the Stripe PaymentIntent id, pack, amount and times. No IP address or name is stored anywhere (Stripe holds the buyer's details), no email address unless the holder adds one (below), and logs carry no IPs or addresses.
+- **Quota emails (optional).** `POST /v1/keys` takes `{"email": ...}`; `POST /v1/keys/email` sets or replaces it and `DELETE /v1/keys/email` removes it (both with the key). The address is used only to say when the key reaches 80% and 100% of its monthly quota. No endpoint returns it in full; `/v1/usage` shows `s***@example.com` and `notices`. When a capture's count reaches the 80% or the 100% mark, the service queues a notice (`notices` table or `{prefix}notices` collection: key id, month, threshold, counts, the upgrade line the MCP tool uses; never the address). It does not send mail. The `skewbald-checks` job in the free-reign repository (`ops/checks/main.py`) sends pending notices through AgentMail every 15 minutes, at most 4 per address per month across all keys, and marks each sent only after a 2xx. Each notice ends with `GET /v1/keys/email/remove?token=...` (also POST, for mail clients' one-click unsubscribe), whose token is an HMAC of the key id and the address under `CALOTYPE_EMAIL_TOKEN_SECRET`. Without that setting no address is stored and nothing is queued. Revoking or deleting a key removes its address; `python -m calotype.admin remove-email ADDRESS_OR_ID` handles a "stop" reply.
 - **Rate limit.** Key creation is limited to 3 per client IP per hour and 200 per hour overall. Both limits live only in process memory (`ratelimit.py`), are never persisted or logged, and reset when the process restarts. With several instances, each instance keeps its own count.
+- **Free tries.** The box at the top of the home page is a plain form (no script needed) that posts the address to `POST /try`. The answer is a site page with the screenshot inline as a `data:` URL, which the site's CSP already allowed (`img-src 'self' data:`); the policy itself is unchanged, only the inline hashes moved. The visitor picks only the address: 1280 × 800, not full page, JPEG at quality 70, ads blocked, normal timeouts; a bare `example.com` gets `https://`. Limits: 5 tries per client IP per hour, in memory like key creation (same `CALOTYPE_TRUSTED_PROXY_HOPS` logic, never stored or logged), and 300 renders per UTC day for everyone, counted in storage so every instance shares it. The address policy runs as for a keyed call, before the daily cap, so a refused address takes no render slot and shows the keyed call's message. A render slot is not given back when the capture fails. A form posted from another site (`Sec-Fetch-Site: cross-site`) is refused. The image is in that one response (`Cache-Control: no-store`) and kept nowhere. Each try adds to the day's counts (`total`, `rendered`, and one of `succeeded`, `failed`, `refused`, `limited`, `capped`; no URL, host or IP) and logs one `try` line like a screenshot's. `GET /try` shows the form (`?url=` only fills the box in). `python -m calotype.admin tries [--days N]` prints the counts. Under the image: `curl -X POST https://calotype.dev/v1/keys -d '{"ref":"try"}'` (the key is labelled `ref:try`), the MCP URL `/mcp?ref=try` (labels an untagged key on first use) and `/agents?ref=try` (whose key button sends `ref`).
 - **Contact ordinal.** A "contact" is a non-internal key with at least one successful screenshot. Its ordinal is its creation order among those keys. Keys made with `python -m calotype.admin create-key` are `internal` and never count. A test key made through the public button (such as key 1 on the live service) is marked the same way with `python -m calotype.admin mark-internal ID`. The demand test counts the first 20. List them with `python -m calotype.admin contacts`. The API also logs `first successful screenshot` with the ordinal when a key becomes a contact. The ordinal is derived on read, so a key created earlier that takes its first screenshot later moves ahead of later-created keys.
 
-Other CLI commands: `list-keys`, `revoke-key ID`, `delete-key ID`, `key-id`, `mark-internal ID`, `set-plan ID PLAN`, `usage ID`, `credits ID`, `refund-credit pi_...` (prepaid credit; see `deploy/README.md`).
+Other CLI commands: `list-keys`, `revoke-key ID`, `delete-key ID`, `key-id`, `mark-internal ID`, `set-plan ID PLAN`, `usage ID`, `remove-email ADDRESS_OR_ID`, `tries [--days N]`, `credits ID`, `refund-credit pi_...` (prepaid credit; see `deploy/README.md`).
 
 `revoke-key` on a paid key cancels its Stripe subscription first: at once, with no prorated refund, or with `--at-period-end` at the end of the month already paid for. It needs `STRIPE_SECRET_KEY` in the environment and refuses without it, unless `--no-stripe` is given; then it revokes the key and warns that the subscription must be cancelled by hand. Running it again on a revoked key that still has a subscription retries the cancellation.
 
-`delete-key ID` handles a request to delete a key's record (the privacy notice promises it within 7 days). Without `--yes` it only prints what it would delete. With `--yes` it cancels a paid key's subscription exactly as `revoke-key` does (same `--at-period-end` and `--no-stripe` flags), then deletes the key's record, all its usage counts, its prepaid credit and its purchase records on either backend, and prints a note that Stripe keeps its own payment records. Ids are not reused. To find a key's id from the key someone sent, pipe the key into `python -m calotype.admin key-id` (it reads standard input, so the key stays out of the shell history).
+`delete-key ID` handles a request to delete a key's record (the privacy notice promises it within 7 days). Without `--yes` it only prints what it would delete. With `--yes` it cancels a paid key's subscription exactly as `revoke-key` does (same `--at-period-end` and `--no-stripe` flags), then deletes the key's record (with any email address), all its usage counts, its quota notices, its prepaid credit and its purchase records on either backend, and prints a note that Stripe keeps its own payment records. Ids are not reused. To find a key's id from the key someone sent, pipe the key into `python -m calotype.admin key-id` (it reads standard input, so the key stays out of the shell history).
 
 ## MCP server
 
@@ -210,6 +215,8 @@ It runs from a checkout of this repo (the working directory must contain `caloty
 | `CALOTYPE_KEYS_PER_IP_PER_HOUR` | 3 | self-serve keys per client IP |
 | `CALOTYPE_KEYS_GLOBAL_PER_HOUR` | 200 | self-serve keys overall |
 | `CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR` | 10 | payment credentials one key may send to `POST /v1/credits` |
+| `CALOTYPE_TRIES_PER_IP_PER_HOUR` | 5 | free tries per client IP (in memory) |
+| `CALOTYPE_TRIES_PER_DAY` | 300 | free-try renders per UTC day for everyone (in storage); 0 turns the box off |
 | `CALOTYPE_TRUSTED_PROXY_HOPS` | 0 | proxies whose `X-Forwarded-For` entry is trusted. Set 1 on Cloud Run |
 | `CALOTYPE_LOG_LEVEL` | INFO | |
 | `CALOTYPE_SERVE_SITE` | 1 | 0 to skip the landing page |
@@ -220,6 +227,7 @@ It runs from a checkout of this repo (the working directory must contain `caloty
 | `CALOTYPE_CREDITS`, `CALOTYPE_CREDITS_CARD` | off | `1` and `1` turn on `POST /v1/credits` (prepaid credit, cards through shared payment tokens). Also needs `STRIPE_SECRET_KEY` and `STRIPE_PROFILE_ID` |
 | `STRIPE_PROFILE_ID` | | the Stripe profile id (`profile_...`) that buyers' tokens are granted to. Not secret |
 | `MPP_SECRET_KEY`, `MPP_REALM`, `STRIPE_MPP_API_VERSION`, `STRIPE_SPT_PAYMENT_METHOD_TYPES` | derived, the public host, `2026-07-29.preview`, `card,link` | optional; see `deploy/README.md` |
+| `CALOTYPE_EMAIL_TOKEN_SECRET` | | signs the removal links in quota emails. Secret, at least 32 characters; the sender job needs the same value. Unset: no address is stored and no notice is queued |
 | `CALOTYPE_API_KEY`, `CALOTYPE_API_URL` | | MCP server only |
 
 No secrets are needed to run the API. Billing needs all four `STRIPE_*` variables; with any missing it stays off and `/v1/billing/*` answers 503. Firestore uses the environment's default Google credentials (on Cloud Run, the service's service account); no key file is used, and none belongs in this repo. The landing-page prices are provisional (a comment in the HTML says so). `plans.json` is the source of truth for quotas.
@@ -244,7 +252,7 @@ calotype/deploy/deploy.sh --dry-run --project PROJECT_ID \
   - Give the Cloud Run service its own service account and grant it **`roles/datastore.user`** on the project (`gcloud projects add-iam-policy-binding PROJECT_ID --member=serviceAccount:calotype-run@PROJECT_ID.iam.gserviceaccount.com --role=roles/datastore.user`). That role reads and writes documents and nothing more. The client finds the credentials itself through the metadata server; do not create or mount a key file.
   - `CALOTYPE_FIRESTORE_PROJECT` is only needed if the database is in another project than the service. `CALOTYPE_FIRESTORE_COLLECTION_PREFIX` (default `calotype_`) separates, say, staging from production in one database.
   - No index needs deploying: every query uses one field, which Firestore indexes automatically.
-  - Cost: a successful screenshot is 2 document reads (key lookup, quota check) and 2 writes (count, lifetime success); a failed capture adds one write for the refund; a refusal at the quota is 2 reads (the count, then the prepaid credit) and no write; a screenshot paid from prepaid credit is one more read and one write than usual; a new key is 2 writes. Firestore's free tier is 50,000 reads and 20,000 writes a day and 1 GiB stored, so about 10,000 screenshots a day cost nothing.
+  - Cost: a successful screenshot is 2 document reads (key lookup, quota check) and 2 writes (count, lifetime success); a failed capture adds one write for the refund; a refusal at the quota is 2 reads (the count, then the prepaid credit) and no write; a screenshot paid from prepaid credit is one more read and one write than usual; a new key is 2 writes. A free try is 1 read and 2 writes when rendered, 1 read and 1 write at the daily cap, and 1 write when refused or over the hourly limit. Firestore's free tier is 50,000 reads and 20,000 writes a day and 1 GiB stored, so about 10,000 screenshots a day cost nothing.
   - With Firestore, keys and quotas are shared across instances, so `--max-instances` can go above 1. The key-creation rate limit and the concurrency limit stay per instance.
   - Without Firestore, the fallback is one instance (`--max-instances 1`) with SQLite on a mounted volume, accepting the risk of loss.
 - `/health` and `/healthz` return 503 if Chromium is not connected. Use either as the startup and liveness probe; from outside a run.app address, only `/health` reaches the app.
@@ -255,9 +263,12 @@ calotype/deploy/deploy.sh --dry-run --project PROJECT_ID \
 
 - Billing is tested against a mocked Stripe client. Live Stripe has run since 17 November 2026; a server without Stripe settings keeps billing off (503). `plans.json` prices must be kept equal to the Stripe Prices by hand.
 - Prepaid credit (`credits.py`) is tested against a mocked Stripe client and the protocol's published examples only. It has never run against Stripe, sandbox or live, or been paid by a real wallet. Stablecoin payment is not built. `deploy/README.md` lists what is unverified.
-- The Stripe processed-event list grows without bound (one small row per event). Firestore TTL or a periodic delete can trim it later.
+- The Stripe processed-event list grows without bound (one small row per event). Firestore TTL or a periodic delete can trim it later. So do quota-notice records (at most two per key per month), until the key is deleted.
+- `admin remove-email ADDRESS` matches the address as stored: the domain in any case, the local part exactly.
+- A removal link is a GET that acts at once, as asked. A mail scanner that opens links could remove an address; the holder can add it again.
 - The Firestore backend is tested against the Firestore emulator only, not against a real Firestore database. Nothing moves data from SQLite to Firestore (there is no deployed data to move).
 - The image is built by Cloud Build (`deploy/cloudbuild.yaml`), not locally; the Playwright base image is about 2 GB.
 - No PDF output, no element selector, no custom headers or cookies, and no caching of repeat captures.
 - `adblock_domains.txt` is a short hand-kept list, not EasyList.
-- Rate limits and the concurrency limit are per instance.
+- Rate limits and the concurrency limit are per instance. The free tries' daily cap is shared (in storage); their per-IP limit is per instance.
+- Free tries share the renderers with keyed calls; a burst of tries can make keyed calls wait or answer `503 busy`. The daily cap bounds it.

@@ -9,16 +9,24 @@ What is stored, and nothing else: the SHA-256 hash of each key (never the
 key), its plan, its creation time, whether it is Calotype's own
 (``internal``: made by an operator, or a test key an operator made through
 the website and marked with ``set_internal``), an optional operator label, usage counts, a revocation time,
-and for paid keys the Stripe customer id and subscription id. Separately, the
-ids of Stripe webhook events already handled, so a repeated delivery is not
-applied twice. For prepaid credit (``credits.py``): each key's credit balance,
-and one record per purchase with the Stripe PaymentIntent id, the pack, the
-amount and the times it was made and refunded. No email, name, IP address or
-other personal data.
+for paid keys the Stripe customer id and subscription id, and, only if the
+holder gave one, an email address for quota notices (``email``). Separately,
+the ids of Stripe webhook events already handled, so a repeated delivery is
+not applied twice, and the quota notices queued for keys with an address
+(``Notice``: key id, month, threshold, counts; never the address). For prepaid
+credit (``credits.py``): each key's credit balance, and one record per
+purchase with the Stripe PaymentIntent id, the pack, the amount and the times
+it was made and refunded. No name, IP address or other personal data.
 
-``delete_key`` removes a key's record, its usage counts, its credit balance and
-its purchase records for good, on the key holder's request (see the privacy
-notice).
+The email address is used for one thing: telling the holder when the key
+reaches 80% and 100% of its monthly quota (``notices.py``). The service only
+queues a notice; a separate job sends it and marks it sent. Removing the
+address (the holder's ``DELETE /v1/keys/email``, the link in each notice, or
+``admin remove-email``), revoking the key, or deleting it clears the address.
+
+``delete_key`` removes a key's record, its usage counts, its notices, its
+credit balance and its purchase records for good, on the key holder's request
+(see the privacy notice).
 
 Prepaid credit is a second, smaller counter next to the monthly one. A
 screenshot is counted against the month's plan quota first (``try_consume``);
@@ -26,6 +34,11 @@ only when that is used up does the app take one credit (``consume_credit``).
 ``add_credit_purchase`` records a purchase and adds its screenshots in one
 atomic step, keyed by the PaymentIntent id, so the same payment arriving twice
 (a retried request, a replayed webhook) adds credit once.
+
+The free tries on the home page (``tries.py``) are counted per UTC day
+(``TryDay``): how many there were and how each ended. Never the URL, the host
+or the IP address. ``try_admit`` also enforces the daily cap on renders, for
+every instance at once.
 
 The "contact ordinal" for the demand test is derived, not stored: it is the
 creation order of non-internal keys that have made at least one successful
@@ -39,7 +52,7 @@ import re
 import secrets
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -62,6 +75,45 @@ class ApiKey:
     # Set by the Stripe webhook once a key has paid. Ids only; Stripe holds the rest.
     stripe_customer_id: str | None = None
     stripe_subscription_id: str | None = None
+    # Optional, for quota notices only. Kept out of repr so it never lands in a log line.
+    email: str | None = field(default=None, repr=False)
+
+
+# A notice goes out at most once per key, month and threshold (percent of the quota).
+NOTICE_THRESHOLDS = (80, 100)
+NOTICE_PENDING = "pending"
+
+
+@dataclass(frozen=True)
+class Notice:
+    """A quota notice queued by the service for the sender job (see ``notices.py``).
+
+    It holds what the email says, never the address: the job reads the
+    address from the key's record when it sends, so an address removed in
+    between is never written to.
+    """
+
+    key_id: int
+    month: str  # YYYY-MM, UTC
+    threshold: int  # 80 or 100
+    used: int
+    quota: int
+    plan: str
+    key_ref: str
+    resets_at: str
+    upgrade: str  # the same line the MCP tool adds near the limit (app.upgrade_text)
+    origin: str  # where the removal link points
+    status: str = NOTICE_PENDING  # pending, then sent, dropped, capped or failed (set by the job)
+    created_at: str = ""
+    sent_at: str | None = None
+
+    @property
+    def id(self) -> str:
+        return notice_id(self.key_id, self.month, self.threshold)
+
+
+def notice_id(key_id: int, month: str, threshold: int) -> str:
+    return f"{int(key_id)}_{month}_{int(threshold)}"
 
 
 @dataclass(frozen=True)
@@ -103,6 +155,26 @@ def source_from_label(label: str) -> str:
     return label[len(REF_LABEL_PREFIX):] if label.startswith(REF_LABEL_PREFIX) else ""
 
 
+# How a free try ended. ``total`` counts every try; each try also adds one to
+# exactly one of these. ``rendered`` (tries let through to the browser, the
+# count the daily cap applies to) is separate: it is taken before the capture.
+TRY_OUTCOMES = ("succeeded", "failed", "refused", "limited", "capped")
+
+
+@dataclass(frozen=True)
+class TryDay:
+    """One UTC day's free tries: counts only, never a URL, host or IP address."""
+
+    day: str  # YYYY-MM-DD, UTC
+    total: int = 0
+    rendered: int = 0  # let through to the browser, against the daily cap
+    succeeded: int = 0  # an image was returned
+    failed: int = 0  # the capture ran and failed (timeout, unreachable, busy...)
+    refused: int = 0  # not a valid URL, or an address the policy refuses
+    limited: int = 0  # over the per-IP limit
+    capped: int = 0  # the day's cap was already reached
+
+
 def hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
@@ -127,9 +199,16 @@ def current_month(now: datetime | None = None) -> str:
     return now.strftime("%Y-%m")
 
 
+def current_day(now: datetime | None = None) -> str:
+    now = now or datetime.now(UTC)
+    return now.strftime("%Y-%m-%d")
+
+
 class Storage(Protocol):
     def init(self) -> None: ...
-    def create_key(self, plan: str, label: str = "", *, internal: bool = False) -> tuple[str, ApiKey]: ...
+    def create_key(
+        self, plan: str, label: str = "", *, internal: bool = False, email: str | None = None
+    ) -> tuple[str, ApiKey]: ...
     def get_key(self, raw_key: str) -> ApiKey | None: ...
     def list_keys(self) -> list[ApiKey]: ...
     def revoke_key(self, key_id: int) -> bool: ...
@@ -169,6 +248,13 @@ class Storage(Protocol):
     def list_credit_purchases(self, key_id: int) -> list[CreditPurchase]: ...
     def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None: ...
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool: ...
+    def set_email(self, key_id: int, email: str | None) -> bool: ...
+    def keys_with_email(self, email: str) -> list[int]: ...
+    def queue_notice(self, notice: Notice) -> bool: ...
+    def list_notices(self, key_id: int) -> list[Notice]: ...
+    def try_admit(self, day: str, limit: int) -> tuple[bool, int]: ...
+    def record_try(self, day: str, outcome: str) -> None: ...
+    def try_days(self, days: list[str]) -> list[TryDay]: ...
 
 
 SCHEMA = """
@@ -182,7 +268,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     internal INTEGER NOT NULL DEFAULT 0,
     successful_screenshots INTEGER NOT NULL DEFAULT 0,
     stripe_customer_id TEXT,
-    stripe_subscription_id TEXT
+    stripe_subscription_id TEXT,
+    email TEXT
 );
 CREATE TABLE IF NOT EXISTS usage (
     key_id INTEGER NOT NULL REFERENCES api_keys(id),
@@ -212,6 +299,33 @@ CREATE TABLE IF NOT EXISTS credit_purchases (
     credits_removed INTEGER NOT NULL DEFAULT 0,
     refund_id TEXT
 );
+CREATE TABLE IF NOT EXISTS notices (
+    id TEXT PRIMARY KEY,
+    key_id INTEGER NOT NULL REFERENCES api_keys(id),
+    month TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    used INTEGER NOT NULL,
+    quota INTEGER NOT NULL,
+    plan TEXT NOT NULL,
+    key_ref TEXT NOT NULL,
+    resets_at TEXT NOT NULL,
+    upgrade TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    to_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS tries (
+    day TEXT PRIMARY KEY,
+    total INTEGER NOT NULL DEFAULT 0,
+    rendered INTEGER NOT NULL DEFAULT 0,
+    succeeded INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    refused INTEGER NOT NULL DEFAULT 0,
+    limited INTEGER NOT NULL DEFAULT 0,
+    capped INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # Columns added after the first release. ``init`` adds any that an older
@@ -219,11 +333,14 @@ CREATE TABLE IF NOT EXISTS credit_purchases (
 _ADDED_KEY_COLUMNS = {
     "stripe_customer_id": "TEXT",
     "stripe_subscription_id": "TEXT",
+    "email": "TEXT",
 }
 _INDEXES = """
 CREATE INDEX IF NOT EXISTS api_keys_subscription ON api_keys (stripe_subscription_id);
 CREATE INDEX IF NOT EXISTS credit_purchases_key ON credit_purchases (key_id);
 CREATE INDEX IF NOT EXISTS credit_purchases_challenge ON credit_purchases (challenge_id);
+CREATE INDEX IF NOT EXISTS api_keys_email ON api_keys (email);
+CREATE INDEX IF NOT EXISTS notices_key ON notices (key_id);
 """
 
 
@@ -260,16 +377,18 @@ class SQLiteStorage:
                 self._conn.close()
                 self._conn = None
 
-    def create_key(self, plan: str, label: str = "", *, internal: bool = False) -> tuple[str, ApiKey]:
+    def create_key(
+        self, plan: str, label: str = "", *, internal: bool = False, email: str | None = None
+    ) -> tuple[str, ApiKey]:
         raw = generate_key()
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             cur = self._db().execute(
-                "INSERT INTO api_keys (key_hash, plan, label, created_at, internal) VALUES (?, ?, ?, ?, ?)",
-                (hash_key(raw), plan, label, now, 1 if internal else 0),
+                "INSERT INTO api_keys (key_hash, plan, label, created_at, internal, email) VALUES (?, ?, ?, ?, ?, ?)",
+                (hash_key(raw), plan, label, now, 1 if internal else 0, email),
             )
             key_id = int(cur.lastrowid)
-        return raw, ApiKey(key_id, plan, label, now, False, internal, 0)
+        return raw, ApiKey(key_id, plan, label, now, False, internal, 0, email=email)
 
     def get_key(self, raw_key: str) -> ApiKey | None:
         with self._lock:
@@ -287,15 +406,19 @@ class SQLiteStorage:
         return [_row_to_key(r) for r in rows]
 
     def revoke_key(self, key_id: int) -> bool:
+        """Revoke the key and forget its email address. False if it was already revoked."""
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             cur = self._db().execute(
-                "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", (now, key_id)
+                "UPDATE api_keys SET revoked_at = ?, email = NULL WHERE id = ? AND revoked_at IS NULL", (now, key_id)
             )
         return cur.rowcount == 1
 
     def delete_key(self, key_id: int) -> bool:
-        """Delete the key's record, usage counts, credit and purchase records. False if there was no such key.
+        """Delete the key's record (with its email address), its usage counts, its notices,
+        its credit balance and its purchase records.
+
+        False if there was no such key.
 
         Ids are never handed out again (``AUTOINCREMENT``), so a late Stripe
         event for a deleted key finds no key rather than another one.
@@ -307,6 +430,7 @@ class SQLiteStorage:
                 db.execute("DELETE FROM usage WHERE key_id = ?", (key_id,))
                 db.execute("DELETE FROM credits WHERE key_id = ?", (key_id,))
                 db.execute("DELETE FROM credit_purchases WHERE key_id = ?", (key_id,))
+                db.execute("DELETE FROM notices WHERE key_id = ?", (key_id,))
                 cur = db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
                 db.execute("COMMIT")
             except BaseException:
@@ -592,14 +716,98 @@ class SQLiteStorage:
         row = self._db().execute("SELECT balance FROM credits WHERE key_id = ?", (key_id,)).fetchone()
         return int(row[0]) if row else 0
 
+    # --- the optional email address and quota notices ----------------------------------
+
+    def set_email(self, key_id: int, email: str | None) -> bool:
+        """Set, replace or (with None) remove the key's address. False if there is no such key."""
+        with self._lock:
+            cur = self._db().execute("UPDATE api_keys SET email = ? WHERE id = ?", (email, key_id))
+        return cur.rowcount == 1
+
+    def keys_with_email(self, email: str) -> list[int]:
+        """Ids of the keys that hold this exact address (for a "stop" reply)."""
+        with self._lock:
+            rows = self._db().execute("SELECT id FROM api_keys WHERE email = ? ORDER BY id", (email,)).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def queue_notice(self, notice: Notice) -> bool:
+        """Record a pending notice. False if this key, month and threshold already has one."""
+        now = notice.created_at or datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            cur = self._db().execute(
+                "INSERT INTO notices (id, key_id, month, threshold, used, quota, plan, key_ref, resets_at, upgrade, "
+                "origin, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (id) DO NOTHING",
+                (notice.id, notice.key_id, notice.month, notice.threshold, notice.used, notice.quota, notice.plan,
+                 notice.key_ref, notice.resets_at, notice.upgrade, notice.origin, NOTICE_PENDING, now),
+            )
+        return cur.rowcount == 1
+
+    def list_notices(self, key_id: int) -> list[Notice]:
+        with self._lock:
+            rows = self._db().execute(
+                "SELECT key_id, month, threshold, used, quota, plan, key_ref, resets_at, upgrade, origin, status, "
+                "created_at, sent_at FROM notices WHERE key_id = ? ORDER BY month, threshold",
+                (key_id,),
+            ).fetchall()
+        return [Notice(int(r[0]), r[1], int(r[2]), int(r[3]), int(r[4]), *r[5:]) for r in rows]
+
+    # --- free tries (tries.py) -----------------------------------------------------------
+
+    def try_admit(self, day: str, limit: int) -> tuple[bool, int]:
+        """Atomically add one to the day's ``rendered`` count if it is under ``limit``.
+
+        Returns (allowed, count after the call). Not refunded when the capture
+        fails: the cap limits rendering, and a failed render costs as much.
+        """
+        with self._lock:
+            if limit <= 0:
+                return False, self._tries_rendered_locked(day)
+            row = self._db().execute(
+                "INSERT INTO tries (day, rendered) VALUES (?, 1) "
+                "ON CONFLICT (day) DO UPDATE SET rendered = rendered + 1 WHERE tries.rendered < ? "
+                "RETURNING rendered",
+                (day, limit),
+            ).fetchone()
+            if row is None:
+                return False, self._tries_rendered_locked(day)
+            return True, int(row[0])
+
+    def record_try(self, day: str, outcome: str) -> None:
+        """Count one try and how it ended (one of ``TRY_OUTCOMES``)."""
+        if outcome not in TRY_OUTCOMES:
+            raise ValueError(f"unknown try outcome {outcome!r}")
+        with self._lock:
+            # outcome is one of the fixed column names above, never input.
+            self._db().execute(
+                f"INSERT INTO tries (day, total, {outcome}) VALUES (?, 1, 1) "
+                f"ON CONFLICT (day) DO UPDATE SET total = total + 1, {outcome} = {outcome} + 1",
+                (day,),
+            )
+
+    def try_days(self, days: list[str]) -> list[TryDay]:
+        """The counts for each of ``days``, in that order; zeros for a day with no tries."""
+        with self._lock:
+            rows = self._db().execute(
+                f"SELECT {_TRY_COLUMNS} FROM tries WHERE day IN ({', '.join('?' * len(days))})", days
+            ).fetchall() if days else []
+        found = {r[0]: TryDay(r[0], *(int(v) for v in r[1:])) for r in rows}
+        return [found.get(d, TryDay(d)) for d in days]
+
+    def _tries_rendered_locked(self, day: str) -> int:
+        row = self._db().execute("SELECT rendered FROM tries WHERE day = ?", (day,)).fetchone()
+        return int(row[0]) if row else 0
+
     def _usage_locked(self, key_id: int, month: str) -> int:
         row = self._db().execute("SELECT count FROM usage WHERE key_id = ? AND month = ?", (key_id, month)).fetchone()
         return int(row[0]) if row else 0
 
 
+_TRY_COLUMNS = "day, total, rendered, succeeded, failed, refused, limited, capped"
+
 _KEY_COLUMNS = (
     "id, plan, label, created_at, revoked_at, internal, successful_screenshots, "
-    "stripe_customer_id, stripe_subscription_id"
+    "stripe_customer_id, stripe_subscription_id, email"
 )
 
 
@@ -614,6 +822,7 @@ def _row_to_key(row) -> ApiKey:
         successful_screenshots=int(row[6]),
         stripe_customer_id=row[7],
         stripe_subscription_id=row[8],
+        email=row[9],
     )
 
 

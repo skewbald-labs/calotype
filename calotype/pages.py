@@ -5,7 +5,7 @@ Each page's content is a fragment in ``site/pages/``, wrapped in the shared
 when the app is created, and served from memory.
 
 The site loads nothing from other hosts: no scripts, fonts, images,
-analytics or cookies. Every inline ``<script>`` and ``<style>`` is hashed into
+analytics or cookies. Images come from the site itself (``site/images/``) or ``data:`` URLs. Every inline ``<script>`` and ``<style>`` is hashed into
 the page's Content-Security-Policy, so a browser runs those and nothing else.
 """
 
@@ -49,8 +49,8 @@ PAGES: tuple[Page, ...] = (
         "/agents",
         "agents.html",
         "For AI agents: add the screenshot tool | Calotype",
-        "Add Calotype's remote MCP server to Claude Code, Cursor, VS Code or Codex in one step, "
-        "and check it works in a minute.",
+        "Add Calotype's remote MCP server to Cursor or VS Code in one click, or to Claude Code, Windsurf, "
+        "Codex or n8n in one step, and check it works in a minute.",
         nav_label="For agents",
     ),
     Page(
@@ -74,8 +74,92 @@ PAGES: tuple[Page, ...] = (
         "switch.html",
         "Switching to Calotype from another screenshot API | Calotype",
         "Parameter names mapped from ScreenshotOne, Urlbox, ApiFlash, ScreenshotAPI.net and Allscreenshots, "
-        "prices per 1,000 as read on 19 November 2026, what other services do that Calotype does not, "
+        "prices per 1,000 as read on 21 November 2026, what other services do that Calotype does not, "
         "and when to use Playwright instead.",
+    ),
+    Page(
+        "/switch/screenshotone",
+        "switch/screenshotone.html",
+        "Switching from ScreenshotOne to Calotype | Calotype",
+        "ScreenshotOne and Calotype side by side: prices per 1,000 as read on 21 November 2026, parameter names "
+        "mapped, one request before and after, and when to stay with ScreenshotOne.",
+    ),
+    Page(
+        "/switch/urlbox",
+        "switch/urlbox.html",
+        "Switching from Urlbox to Calotype | Calotype",
+        "Urlbox and Calotype side by side: Lo-Fi and Hi-Fi prices as read on 21 November 2026, render options "
+        "mapped to Calotype's parameters, one request before and after, and when to stay with Urlbox.",
+    ),
+    Page(
+        "/switch/screenshotapi-net",
+        "switch/screenshotapi-net.html",
+        "Switching from ScreenshotAPI.net to Calotype | Calotype",
+        "ScreenshotAPI.net and Calotype side by side: prices at each plan as read on 21 November 2026, where "
+        "ScreenshotAPI.net costs less, parameter names mapped, and one request before and after.",
+    ),
+    Page(
+        "/switch/allscreenshots",
+        "switch/allscreenshots.html",
+        "Switching from Allscreenshots to Calotype | Calotype",
+        "Allscreenshots and Calotype side by side: prices as read on 21 November 2026, camel-case options mapped "
+        "to Calotype's parameters, defaults that differ, and when to stay with Allscreenshots.",
+    ),
+    Page(
+        "/switch/apiflash",
+        "switch/apiflash.html",
+        "Switching from ApiFlash to Calotype | Calotype",
+        "ApiFlash and Calotype side by side: prices as read on 21 November 2026, parameter names mapped, the "
+        "network-wait default that differs, and when ApiFlash is the smaller bill.",
+    ),
+    Page(
+        "/switch/playwright-mcp",
+        "switch/playwright-mcp.html",
+        "Playwright MCP or Calotype | Calotype",
+        "Playwright MCP is free and runs a browser next to your agent; Calotype is a remote screenshot tool. "
+        "Where each runs, what each installs, private pages, interaction, and when to keep Playwright MCP.",
+    ),
+    Page(
+        "/compare/screenshot-mcp-servers",
+        "compare/screenshot-mcp-servers.html",
+        "Screenshot MCP servers compared | Calotype",
+        "Playwright MCP, Chrome DevTools MCP, ScreenshotOne, Urlbox, Allscreenshots, ScreenshotAPI.net and "
+        "Calotype: local or remote, sign-in, what the model gets and price. By the agent that runs Calotype.",
+    ),
+    Page(
+        "/guides",
+        "guides.html",
+        "Guides: screenshots from code, agents and workflows | Calotype",
+        "Four how-to guides: screenshots in Claude Code and Cursor, Playwright in Python and where it breaks, "
+        "a screenshot step in n8n, and why a headless browser inside your network is an SSRF risk.",
+    ),
+    Page(
+        "/guides/claude-code-cursor-screenshots",
+        "guides/claude-code-cursor-screenshots.html",
+        "Screenshots in Claude Code or Cursor without a local browser | Calotype",
+        "Two ways to let a coding agent see a rendered page: Playwright MCP next to the agent, or a remote MCP "
+        "server. When each is the better choice, with set-up for Claude Code and Cursor.",
+    ),
+    Page(
+        "/guides/playwright-python-screenshots",
+        "guides/playwright-python-screenshots.html",
+        "Playwright screenshots in Python, and where they break | Calotype",
+        "Fonts, lazy loading, cookie banners, full-page captures, containers and timeouts: what goes wrong "
+        "with Playwright screenshots in Python, and tested code that fixes each one.",
+    ),
+    Page(
+        "/guides/n8n-screenshot-workflow",
+        "guides/n8n-screenshot-workflow.html",
+        "Add a screenshot step to an n8n workflow | Calotype",
+        "Take a web page screenshot in n8n with the HTTP Request node or the MCP Client Tool: settings, "
+        "error handling, and how much quota a schedule uses.",
+    ),
+    Page(
+        "/guides/headless-browser-ssrf",
+        "guides/headless-browser-ssrf.html",
+        "A headless browser inside your network is an SSRF risk | Calotype",
+        "What a screenshot browser can reach from inside your network, why checking the address is not enough, "
+        "how to defend it yourself, and what Calotype's code does.",
     ),
     Page(
         "/acceptable-use",
@@ -122,7 +206,7 @@ def canonical_url(path: str) -> str:
     return SITE_ORIGIN + ("" if path == "/" else path)
 
 
-def _nav(current: Page) -> str:
+def _nav(current: Page | None) -> str:
     links = []
     for page in PAGES:
         if page.nav_label:
@@ -141,7 +225,7 @@ def _csp(document: str) -> str:
     script_src = " ".join(hashes["script"]) or "'none'"
     style_src = " ".join(hashes["style"]) or "'none'"
     return (
-        f"default-src 'none'; script-src {script_src}; style-src {style_src}; img-src data:; "
+        f"default-src 'none'; script-src {script_src}; style-src {style_src}; img-src 'self' data:; "
         "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
     )
 
@@ -157,15 +241,39 @@ def sale_text(content: str, paid_open: bool) -> str:
     return keep.sub(lambda m: m.group(1), drop.sub("", content))
 
 
-def render_page(page: Page, site_dir: Path, paid_open: bool = True) -> RenderedPage:
+# The home page's try box (site/try-form.html) goes where a page has this marker.
+TRY_FORM_MARK = "<!--try-form-->"
+
+
+@dataclass(frozen=True)
+class TryLimits:
+    """The free-try limits the box states (from Settings); ``per_day`` 0 means tries are off."""
+
+    per_ip_per_hour: int = 5
+    per_day: int = 300
+
+
+def try_form(site_dir: Path, limits: TryLimits, url: str = "") -> str:
+    """The try box: a plain form that posts to /try, with the limits it states filled in."""
+    if limits.per_day <= 0:
+        return ""
+    form = (site_dir / "try-form.html").read_text(encoding="utf-8")
+    form = form.replace("TRIES_PER_IP", f"{limits.per_ip_per_hour:,}").replace("TRIES_PER_DAY", f"{limits.per_day:,}")
+    return form.replace('value=""', f'value="{html.escape(url, quote=True)}"', 1)
+
+
+def render_document(
+    site_dir: Path, *, path: str, title: str, description: str, content: str,
+    current: Page | None = None, draft: bool = False,
+) -> RenderedPage:
+    """Wrap ``content`` in the shared layout and compute its Content-Security-Policy."""
     layout = (site_dir / "layout.html").read_text(encoding="utf-8")
-    content = sale_text((site_dir / "pages" / page.source).read_text(encoding="utf-8"), paid_open)
-    banner = f'<p class="draft-banner" role="note">{html.escape(DRAFT_BANNER)}</p>' if page.draft else ""
+    banner = f'<p class="draft-banner" role="note">{html.escape(DRAFT_BANNER)}</p>' if draft else ""
     fields = {
-        "title": html.escape(page.title),
-        "description": html.escape(page.description),
-        "canonical": html.escape(canonical_url(page.path)),
-        "nav": _nav(page),
+        "title": html.escape(title),
+        "description": html.escape(description),
+        "canonical": html.escape(canonical_url(path)),
+        "nav": _nav(current),
         "draft_banner": banner,
     }
     document = layout
@@ -174,8 +282,17 @@ def render_page(page: Page, site_dir: Path, paid_open: bool = True) -> RenderedP
     # Content last, so nothing in it is taken for a placeholder.
     document = document.replace("{{content}}", content)
     if "{{" in document.replace(content, ""):
-        raise ValueError(f"unfilled placeholder in the layout for {page.path}")
+        raise ValueError(f"unfilled placeholder in the layout for {path}")
     return RenderedPage(document.encode("utf-8"), _csp(document))
+
+
+def render_page(page: Page, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits()) -> RenderedPage:
+    content = sale_text((site_dir / "pages" / page.source).read_text(encoding="utf-8"), paid_open)
+    content = content.replace(TRY_FORM_MARK, try_form(site_dir, tries))
+    return render_document(
+        site_dir, path=page.path, title=page.title, description=page.description, content=content,
+        current=page, draft=page.draft,
+    )
 
 
 def sitemap_xml() -> str:
@@ -189,15 +306,16 @@ def sitemap_xml() -> str:
 
 
 def robots_txt() -> str:
-    return f"User-agent: *\nAllow: /\nDisallow: /v1/\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
+    # /try renders a page on each visit; crawlers have no reason to.
+    return f"User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /try\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
 
 
-def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True) -> None:
+def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits()) -> None:
     """Serve every page in ``PAGES``, plus /robots.txt and /sitemap.xml (GET and HEAD).
 
     ``paid_open`` is whether this server sells paid plans (Stripe is set up); it picks the
-    sale or no-sale text in each page."""
-    rendered = {page.path: render_page(page, site_dir, paid_open) for page in PAGES}
+    sale or no-sale text in each page. ``tries`` are the limits the home page's try box states."""
+    rendered = {page.path: render_page(page, site_dir, paid_open, tries) for page in PAGES}
 
     def page_endpoint(path: str):
         page = rendered[path]
@@ -227,11 +345,12 @@ def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True) -> Non
         app.add_route(path, page_endpoint(path), include_in_schema=False)
     app.add_route("/robots.txt", text_endpoint(robots_txt(), "text/plain; charset=utf-8"), include_in_schema=False)
     app.add_route("/sitemap.xml", text_endpoint(sitemap_xml(), "application/xml"), include_in_schema=False)
-    for path, (data, media_type) in brand_files(site_dir).items():
+    for path, (data, media_type) in {**brand_files(site_dir), **image_files(site_dir)}.items():
         app.add_route(path, file_endpoint(data, media_type), include_in_schema=False)
 
 
 BRAND_TYPES = {".svg": "image/svg+xml", ".png": "image/png"}
+IMAGE_TYPES = {".webp": "image/webp", ".png": "image/png"}
 
 
 def brand_files(site_dir: Path) -> dict[str, tuple[bytes, str]]:
@@ -246,6 +365,21 @@ def brand_files(site_dir: Path) -> dict[str, tuple[bytes, str]]:
         f"/{f.name}": (f.read_bytes(), BRAND_TYPES[f.suffix])
         for f in sorted(brand_dir.iterdir())
         if f.suffix in BRAND_TYPES
+    }
+
+
+def image_files(site_dir: Path) -> dict[str, tuple[bytes, str]]:
+    """Images the pages and the README show, such as the demo screenshot, at ``/images/<name>``.
+
+    A file's name is its URL, so replace an image under a new name rather than editing it:
+    the README on GitHub links to these paths."""
+    images_dir = site_dir / "images"
+    if not images_dir.is_dir():
+        return {}
+    return {
+        f"/images/{f.name}": (f.read_bytes(), IMAGE_TYPES[f.suffix])
+        for f in sorted(images_dir.iterdir())
+        if f.suffix in IMAGE_TYPES
     }
 
 

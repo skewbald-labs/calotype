@@ -1,11 +1,28 @@
   <h1>Calotype for AI agents</h1>
   <p class="lede">Give your agent one tool, <code>screenshot</code>, that looks at any public web page from Calotype's browser. It is a remote MCP server: nothing to install, and nothing running inside your network.</p>
 
+  <div class="install" id="install">
+    <a class="button" href="cursor://anysphere.cursor-deeplink/mcp/install?name=calotype&amp;config=eyJ1cmwiOiJodHRwczovL2NhbG90eXBlLmRldi9tY3A%2FcmVmPWJ0bi1jdXJzb3Itc2l0ZSIsImhlYWRlcnMiOnsiQXV0aG9yaXphdGlvbiI6IkJlYXJlciAke2VudjpDQUxPVFlQRV9LRVl9In19">Add to Cursor</a>
+    <a class="button" href="vscode:mcp/install?%7B%22name%22%3A%22calotype%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fcalotype.dev%2Fmcp%3Fref%3Dbtn-vscode-site%22%2C%22headers%22%3A%7B%22Authorization%22%3A%22Bearer%20%24%7Binput%3Acalotype-key%7D%22%7D%2C%22inputs%22%3A%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22calotype-key%22%2C%22description%22%3A%22Calotype%20API%20key%2C%20starts%20cal_%22%2C%22password%22%3Atrue%7D%5D%7D">Install in VS Code</a>
+  </div>
+  <p class="muted">Each button opens the app, which shows the server and asks before adding it. Neither carries a key. VS Code asks for yours and keeps it in its secret storage; Cursor reads it from the <code>CALOTYPE_KEY</code> environment variable, so set that first. No key yet? <a href="#key">Get one free</a>. Other clients are <a href="#claude-code">below</a>.</p>
+
+  <figure class="demo" id="demo">
+<pre><code>curl -G <span class="origin">https://calotype.dev</span>/v1/screenshot \
+  -H "Authorization: Bearer $CALOTYPE_KEY" \
+  -d url=https://calotype.dev/pricing -d dark_mode=true -d format=webp \
+  -o pricing.webp</code></pre>
+    <img src="/images/demo-pricing-dark.webp" width="1280" height="800" alt="Calotype's output for that request: the calotype.dev pricing page in dark mode, with Free, Starter and Pro plans side by side. Captured on 20 November 2026.">
+    <figcaption>What that request returns, unedited: the pricing page in dark mode at the default 1280 by 800, a 45 KB WebP. Captured on 20 November 2026 by Calotype's own code with these parameters. Through MCP it is the <code>screenshot</code> tool with <code>url</code> and <code>dark_mode: true</code>, which returns JPEG unless asked for another format.</figcaption>
+  </figure>
+
   <ul class="toc">
     <li><a href="#key">1. Get a key</a></li>
     <li><a href="#claude-code">2. Claude Code</a></li>
     <li><a href="#cursor">Cursor</a></li>
     <li><a href="#vscode">VS Code</a></li>
+    <li><a href="#windsurf">Windsurf</a></li>
+    <li><a href="#claude-desktop">Claude Desktop</a></li>
     <li><a href="#codex">Codex</a></li>
     <li><a href="#n8n">n8n</a></li>
     <li><a href="#other">Other clients</a></li>
@@ -18,6 +35,7 @@
   <h2 id="key">1. Get a free key</h2>
   <p>100 screenshots a month, with no email, no name and no account. Use the button, or let your agent make its own:</p>
 <pre><code>curl -s -X POST <span class="origin">https://calotype.dev</span>/v1/keys</code></pre>
+  <p>To be emailed when the key reaches 80% and 100% of its monthly quota, add an address; it is optional and used for nothing else: <code>-H "Content-Type: application/json" -d '{"email": "you@example.com"}'</code>.</p>
   <p>The answer's <code>key</code> field starts with <code>cal_</code>. It is shown once and cannot be shown again. Each address can make a few keys an hour.</p>
   <button id="create-key" type="button">Create a free API key</button>
   <div id="keybox" class="keybox" aria-live="polite">
@@ -58,6 +76,27 @@
   }
 }</code></pre>
 
+  <h3 id="windsurf">Windsurf</h3>
+  <p>In Cascade's MCP menu, choose <strong>Open MCP config file</strong>. Windsurf takes the address as <code>serverUrl</code> and fills <code>${env:CALOTYPE_KEY}</code> from your environment:</p>
+<pre><code>{
+  "mcpServers": {
+    "calotype": {
+      "serverUrl": "<span class="origin">https://calotype.dev</span>/mcp",
+      "headers": {"Authorization": "Bearer ${env:CALOTYPE_KEY}"}
+    }
+  }
+}</code></pre>
+
+  <h3 id="claude-desktop">Claude Desktop</h3>
+  <p>Claude Desktop adds remote servers as custom connectors in your Claude account, not in a config file. A connector can send an API key only through <strong>Request headers</strong>, which Anthropic describes as a beta open to a limited set of organizations. If your <strong>Add custom connector</strong> dialog has that section (it may sit under <strong>Advanced</strong>):</p>
+  <ul>
+    <li>Customize &gt; Connectors &gt; Add &gt; Add custom connector</li>
+    <li>MCP server URL: <code><span class="origin">https://calotype.dev</span>/mcp</code></li>
+    <li>Authentication: <strong>No sign-in</strong></li>
+    <li>Request headers: name <code>Authorization</code>, value <code>Bearer cal_...</code>. Type the word <code>Bearer</code> and a space yourself; Claude adds nothing</li>
+  </ul>
+  <p>Without that section, Claude Desktop cannot send the key, because Calotype does not offer OAuth sign-in yet. A local bridge such as the community <code>mcp-remote</code> package can add the header from <code>claude_desktop_config.json</code>; Calotype has not tested that. Custom connectors call the server from Anthropic's cloud, not from your computer.</p>
+
   <h3 id="codex">Codex</h3>
   <p>In <code>~/.codex/config.toml</code>. Codex sends the variable's value as the bearer token:</p>
 <pre><code>[mcp_servers.calotype]
@@ -71,7 +110,7 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
     <li>Server Transport: <strong>HTTP Streamable</strong>, not Server Sent Events</li>
     <li>Authentication: <strong>Bearer Auth</strong>, with a new credential that holds your key</li>
   </ul>
-  <p>n8n keeps the key in its encrypted credential store, not in the workflow.</p>
+  <p>n8n keeps the key in its encrypted credential store, not in the workflow. For a plain workflow step with no agent, and for error handling, see the guide to <a href="/guides/n8n-screenshot-workflow">a screenshot step in n8n</a>.</p>
 
   <h3 id="other">Other clients</h3>
   <p>Any client that takes a server address and a custom header works. It needs three things:</p>
@@ -98,12 +137,12 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
     <li><strong>Sandboxes.</strong> If your agent's sandbox limits outbound traffic, allow <code>calotype.dev</code>.</li>
   </ul>
   <h2 id="playwright">Calotype or Playwright?</h2>
-  <p>Playwright MCP runs a real browser next to your agent. Its README, read on 19 November 2026, asks for Node.js 20 or newer and starts the server with <code>npx @playwright/mcp@latest</code>. The browser runs on that machine, or in the project's Docker image.</p>
+  <p>Playwright MCP runs a real browser next to your agent. Its README, read on 21 November 2026, asks for Node.js 20 or newer and starts the server with <code>npx @playwright/mcp@latest</code>. The browser runs on that machine, or in the project's Docker image.</p>
   <ul>
     <li><strong>Use Playwright</strong> when the agent runs where a browser can run, when it needs to click, type or log in, or when the page is private, such as <code>localhost</code> or a staging site.</li>
     <li><strong>Use Calotype</strong> when there is no browser to install: hosted agents, cloud sandboxes, n8n, serverless functions. Also use it when a browser is too heavy for the container, or when one look at a public page is enough.</li>
   </ul>
-  <p>Many setups use both. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
+  <p>Many setups use both. The longer comparison is in <a href="/guides/claude-code-cursor-screenshots">Screenshots in Claude Code or Cursor without a local browser</a>. Other MCP servers that take screenshots, local and hosted, are in <a href="/compare/screenshot-mcp-servers">Screenshot MCP servers compared</a>. Coming from another screenshot API? <a href="/switch">Switching to Calotype</a> maps the parameters and compares prices.</p>
 
   <h2 id="pay">Paying without a person (not yet live)</h2>
   <p><strong>Not yet live.</strong> Today a key gets more than 100 screenshots a month through a <a href="/pricing">paid plan</a>, which a person buys on a checkout page. An endpoint for agents is written and switched off: <code>POST /v1/credits</code> will sell a prepaid pack of 5,000 screenshots for $19 over the Machine Payments Protocol. The agent's wallet pays a <code>402</code> challenge, and the screenshots are added to the key it already uses, to be spent after the month's quota. The <a href="/docs#credits">docs</a> describe the request and the answers. Nothing can be bought this way yet.</p>

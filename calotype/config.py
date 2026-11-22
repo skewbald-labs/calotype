@@ -71,12 +71,20 @@ class Settings:
     # passes the checks is a call to Stripe, so this bounds what a free key can make
     # Calotype ask Stripe. In memory, per instance, like the key limits.
     credit_payments_per_key_per_hour: int = 10
+    # Free tries on the home page (tries.py): per client IP per hour, in memory
+    # only, and per UTC day for everyone, counted in storage. 0 a day turns them off.
+    tries_per_ip_per_hour: int = 5
+    tries_per_day: int = 300
     # Proxies in front of the app whose X-Forwarded-For entry is trusted.
     # 0 = use the socket peer. Cloud Run: 1.
     trusted_proxy_hops: int = 0
     # The public origin, e.g. https://calotype.example. Stripe sends buyers back
     # here after checkout and from the portal. Empty: taken from the request.
     public_url: str = ""
+    # Signs the one-click links that remove an email address from a key
+    # (notices.py). Secret. Unset or under 32 characters: no address is stored
+    # and no quota notice is queued. The sender job needs the same value.
+    email_token_secret: str = field(default="", repr=False)
     plans: dict[str, Plan] = field(default_factory=dict)
     # Prepaid packs, from the plans file's "credit_packs". None: not loaded yet (see with_plans).
     credit_packs: dict[str, CreditPack] | None = None
@@ -109,8 +117,11 @@ class Settings:
             keys_per_ip_per_hour=_env_int("CALOTYPE_KEYS_PER_IP_PER_HOUR", 3),
             keys_global_per_hour=_env_int("CALOTYPE_KEYS_GLOBAL_PER_HOUR", 200),
             credit_payments_per_key_per_hour=_env_int("CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR", 10),
+            tries_per_ip_per_hour=_env_int("CALOTYPE_TRIES_PER_IP_PER_HOUR", 5),
+            tries_per_day=_env_int("CALOTYPE_TRIES_PER_DAY", 300),
             trusted_proxy_hops=_env_int("CALOTYPE_TRUSTED_PROXY_HOPS", 0),
             public_url=os.environ.get("CALOTYPE_PUBLIC_URL", "").strip().rstrip("/"),
+            email_token_secret=os.environ.get("CALOTYPE_EMAIL_TOKEN_SECRET", "").strip(),
             plans=load_plans(plans_file),
             credit_packs=load_credit_packs(plans_file),
         )

@@ -211,3 +211,27 @@ def test_control_ssrf_page_does_reach_canary_when_allowed(settings, store, site,
     assert r.status_code == 200, r.text
     paths = set(canary.hits)
     assert {"/img", "/fetch", "/iframe", "/img-rebind", "/fetch-rebind"} <= paths, paths
+
+
+def test_end_to_end_try_returns_an_inline_jpeg_and_keeps_the_policy(make_client, site, canary):
+    import base64
+    import re
+
+    client = make_client()
+    r = client.post("/try", data={"url": site.url("/")})
+    assert r.status_code == 200, r.text
+    m = re.search(r'<img src="data:image/jpeg;base64,([A-Za-z0-9+/=]+)"', r.text)
+    assert m
+    img = Image.open(io.BytesIO(base64.b64decode(m.group(1))))
+    assert img.format == "JPEG" and img.size == (1280, 800)
+    rr, gg, bb = img.convert("RGB").getpixel((640, 700))
+    assert rr > 200 and gg < 60 and bb < 60  # the test page's red, through JPEG
+
+    # A page that tries every way to reach loopback reaches nothing, as with a key.
+    r = client.post("/try", data={"url": site.url("/ssrf")})
+    assert r.status_code == 200, r.text
+    assert canary.hits == [], f"page reached the canary: {canary.hits}"
+    # A redirect to loopback is refused in the browser, with the keyed call's error.
+    r = client.post("/try", data={"url": site.url("/redirect")})
+    assert r.status_code == 422 and "<img" not in r.text
+    assert canary.hits == []

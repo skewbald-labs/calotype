@@ -258,7 +258,10 @@ def test_the_privacy_notice_describes_the_deletion_this_cli_does():
     from calotype.config import SITE_DIR
 
     text = " ".join((SITE_DIR / "pages" / "privacy.html").read_text().split())
-    assert "Within 7 days of your request, the key's record and all its monthly usage counts are deleted" in text
+    assert (
+        "Within 7 days of your request, the key's record (with its email address, if it had one), "
+        "all its monthly usage counts and its quota-email records are deleted"
+    ) in text
     assert "subscription is cancelled first" in text and "Stripe keeps its own records" in text
     with pytest.raises(SystemExit) as done:
         admin.main(["delete-key", "--help"])
@@ -298,3 +301,19 @@ def test_find_ref_finds_the_key_its_holder_quotes(admin_store, capsys):
     out = capsys.readouterr()
     assert f"key {key.id}:" in out.out and raw not in out.out + out.err
     assert admin.main(["find-ref", "000000000000" if not key_ref(raw).startswith("000000000000") else "ffffffffffff"]) == 1
+
+
+def test_admin_tries_prints_daily_counts(admin_store, capsys):
+    from calotype.storage import current_day
+
+    day = current_day()
+    admin_store.try_admit(day, 300)
+    admin_store.record_try(day, "succeeded")
+    admin_store.record_try(day, "refused")
+    assert admin.main(["tries", "--days", "2"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "day\ttotal\trendered\tsucceeded\tfailed\trefused\tlimited\tcapped"
+    assert lines[1] == f"{day}\t2\t1\t1\t0\t1\t0\t0"
+    assert len(lines) == 3 and lines[2].endswith("\t0\t0\t0\t0\t0\t0\t0")
+    with pytest.raises(SystemExit):
+        admin.main(["tries", "--days", "0"])
