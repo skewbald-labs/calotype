@@ -42,6 +42,8 @@ def bearer(key: str) -> dict:
         ("POST", "/mcp", 200, False, {"initialize"}, ["looked"]),
         ("POST", "/mcp", 200, False, {"tools/list"}, ["looked"]),
         ("POST", "/mcp", 200, False, {"tools/call"}, ["tool_no_key"]),
+        ("POST", "/mcp", 401, False, {"tools/call"}, ["tool_no_key"]),  # OAuth on: keyless call is a 401
+        ("POST", "/mcp", 401, False, {"tools/list"}, []),
         ("POST", "/mcp", 200, False, {"initialize", "tools/call"}, ["looked", "tool_no_key"]),
         ("POST", "/mcp", 202, False, {"notifications/initialized"}, []),
         ("POST", "/mcp", 200, False, {"ping"}, []),

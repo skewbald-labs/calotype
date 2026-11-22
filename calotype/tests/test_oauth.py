@@ -709,6 +709,13 @@ def test_a_keyless_tool_call_answers_401_with_the_challenge(oc, fake_renderer):
     assert fake_renderer.calls == []
 
 
+def test_a_keyless_tool_call_401_still_counts_in_the_funnel(oc, store):
+    rpc(oc, None, "tools/call", {"name": "screenshot", "arguments": {"url": "https://example.com"}})
+    oc.app.state.funnel.wait()
+    from calotype.storage import current_day
+    assert store.funnel_days([current_day()])[0].tool_no_key == 1
+
+
 def test_the_challenge_keeps_the_ref_tag(oc):
     r = rpc(oc, None, "tools/call", {"name": "screenshot", "arguments": {"url": "https://example.com"}},
             path="/mcp?ref=glama")

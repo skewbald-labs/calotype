@@ -174,10 +174,11 @@ def classify(
     if status == 401 and key_sent and path in (SCREENSHOT_PATH, MCP_PATH):
         return ["bad_key"]
 
-    if path == MCP_PATH and method == "POST" and not key_sent and 0 < status < 400:
-        if rpc_methods & LOOK_METHODS:
+    if path == MCP_PATH and method == "POST" and not key_sent:
+        if rpc_methods & LOOK_METHODS and 0 < status < 400:
             events.append("looked")
-        if "tools/call" in rpc_methods:
+        # With OAuth on, a keyless tools/call answers 401 (so OAuth clients sign in); without, 200.
+        if "tools/call" in rpc_methods and (0 < status < 400 or status == 401):
             events.append("tool_no_key")
     return events
 
