@@ -21,6 +21,7 @@
     <li><a href="#claude-code">2. Claude Code</a></li>
     <li><a href="#cursor">Cursor</a></li>
     <li><a href="#vscode">VS Code</a></li>
+    <!--oauth--><li><a href="#connectors">claude.ai or ChatGPT</a></li><!--/oauth-->
     <li><a href="#windsurf">Windsurf</a></li>
     <li><a href="#claude-desktop">Claude Desktop</a></li>
     <li><a href="#codex">Codex</a></li>
@@ -87,15 +88,20 @@
   }
 }</code></pre>
 
-  <h3 id="claude-desktop">Claude Desktop</h3>
-  <p>Claude Desktop adds remote servers as custom connectors in your Claude account, not in a config file. A connector can send an API key only through <strong>Request headers</strong>, which Anthropic describes as a beta open to a limited set of organizations. If your <strong>Add custom connector</strong> dialog has that section (it may sit under <strong>Advanced</strong>):</p>
+<!--oauth-->  <h3 id="connectors">Connect from claude.ai or ChatGPT</h3>
+  <p>Clients that sign in with OAuth need no key from you. Add <code><span class="origin">https://calotype.dev</span>/mcp</code> as a custom connector, with no header and nothing in the OAuth client fields. In claude.ai, Claude Desktop and the Claude apps: Customize &gt; Connectors &gt; Add &gt; Add custom connector. In ChatGPT: a connector made in developer mode, with OAuth as its authentication.</p>
+  <p>The first time the agent calls the tool, the client opens Calotype's consent page in your browser. Approve gives the client a new free key: 100 screenshots a month, no account, no email. Or paste a key you already have, such as a paid one, and the client uses that. The client keeps the key and sends it for you; you do not have to copy it anywhere.</p>
+  <p class="muted">Calotype tested this sign-in with the official MCP Python SDK's OAuth client, from the first call to a screenshot. It has not yet been tried from claude.ai or ChatGPT themselves. How it works: <a href="/docs#oauth">Docs</a>.</p>
+
+<!--/oauth-->  <h3 id="claude-desktop">Claude Desktop</h3>
+  <p><!--oauth-->With a key instead of sign-in: <!--/oauth-->Claude Desktop adds remote servers as custom connectors in your Claude account, not in a config file. A connector can send an API key only through <strong>Request headers</strong>, which Anthropic describes as a beta open to a limited set of organizations. If your <strong>Add custom connector</strong> dialog has that section (it may sit under <strong>Advanced</strong>):</p>
   <ul>
     <li>Customize &gt; Connectors &gt; Add &gt; Add custom connector</li>
     <li>MCP server URL: <code><span class="origin">https://calotype.dev</span>/mcp</code></li>
     <li>Authentication: <strong>No sign-in</strong></li>
     <li>Request headers: name <code>Authorization</code>, value <code>Bearer cal_...</code>. Type the word <code>Bearer</code> and a space yourself; Claude adds nothing</li>
   </ul>
-  <p>Without that section, Claude Desktop cannot send the key, because Calotype does not offer OAuth sign-in yet. A local bridge such as the community <code>mcp-remote</code> package can add the header from <code>claude_desktop_config.json</code>; Calotype has not tested that. Custom connectors call the server from Anthropic's cloud, not from your computer.</p>
+  <p><!--oauth-->Without that section, use <a href="#connectors">sign-in</a> instead.<!--/oauth--><!--nooauth-->Without that section, Claude Desktop cannot send the key, because Calotype does not offer OAuth sign-in yet.<!--/nooauth--> A local bridge such as the community <code>mcp-remote</code> package can add the header from <code>claude_desktop_config.json</code>; Calotype has not tested that. Custom connectors call the server from Anthropic's cloud, not from your computer.</p>
 
   <h3 id="codex">Codex</h3>
   <p>In <code>~/.codex/config.toml</code>. Codex sends the variable's value as the bearer token:</p>
@@ -119,7 +125,7 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
     <li>Transport: streamable HTTP (not the older SSE transport)</li>
     <li>Header: <code>Authorization: Bearer cal_...</code></li>
   </ul>
-  <p>Sign-in by OAuth is not offered yet, so clients that only support OAuth cannot connect.</p>
+  <p><!--oauth-->A client that only signs in with OAuth needs just the address: see <a href="#connectors">claude.ai or ChatGPT</a>.<!--/oauth--><!--nooauth-->Sign-in by OAuth is not offered yet, so clients that only support OAuth cannot connect.<!--/nooauth--></p>
 
   <h2 id="check">3. Check it works</h2>
   <p>Ask your agent:</p>

@@ -19,7 +19,7 @@
     <li>the pages are public, and one image of each is enough;</li>
     <li>an AI agent needs to see pages, and it has no browser of its own;</li>
     <li>the agent should be able to get started alone: a free key comes from one <code>POST /v1/keys</code>, with no account, email or card;</li>
-    <li>the MCP client takes a header but not OAuth. Calotype's remote MCP server takes a bearer key.</li>
+    <li><!--nooauth-->the MCP client takes a header but not OAuth. Calotype's remote MCP server takes a bearer key.<!--/nooauth--><!--oauth-->the MCP client takes a header, or signs in with OAuth. Calotype's remote MCP server takes either.<!--/oauth--></li>
   </ul>
   <p>Calotype does not fit when you need PDF, HTML input, video, Markdown, cookies or headers for logged-in pages, proxies, element capture, or pages on a private network. Stay with a service that has them. The list is <a href="#more">below</a>.</p>
 
@@ -103,7 +103,7 @@
     <li><strong>Cleaner shots:</strong> hiding cookie banners (all five), CSS and JavaScript injection, and element capture.</li>
     <li><strong>Network options:</strong> proxies, a choice of IP location, and stealth modes for sites that block automated browsers.</li>
     <li><strong>Delivery:</strong> upload to S3, caching, webhooks, and no-code integrations such as Zapier and Make.</li>
-    <li><strong>MCP sign-in by OAuth:</strong> ScreenshotOne, Urlbox and Allscreenshots run remote MCP servers that sign in with OAuth. Calotype takes a key in a header only.</li>
+    <!--nooauth--><li><strong>MCP sign-in by OAuth:</strong> ScreenshotOne, Urlbox and Allscreenshots run remote MCP servers that sign in with OAuth. Calotype takes a key in a header only.</li><!--/nooauth-->
     <li><strong>Track record:</strong> Urlbox says it has operated for over a decade. Calotype started in November 2026.</li>
   </ul>
 

@@ -869,7 +869,7 @@ def create_app(
 
     if settings.serve_site and SITE_DIR.is_dir():
         tries = TryLimits(settings.tries_per_ip_per_hour, settings.tries_per_day)
-        add_site_routes(app, SITE_DIR, paid_open=billing.configured, tries=tries)
+        add_site_routes(app, SITE_DIR, paid_open=billing.configured, tries=tries, oauth_on=oauth is not None)
         # The home page's try box: a capture with no key, under its own limits.
         add_try_routes(app, settings=settings, policy=policy, renderer=renderer, site_dir=SITE_DIR)
 

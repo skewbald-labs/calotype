@@ -304,6 +304,8 @@ def test_consent_page_names_the_client_and_the_redirect_host(oc, store):
     csp = r.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp and "form-action 'self' https://claude.ai;" in csp
     assert r.headers["x-frame-options"] == "DENY" and r.headers["cache-control"] == "no-store"
+    # Not no-referrer, which makes browsers send "Origin: null" on the form's POST.
+    assert r.headers["referrer-policy"] == "same-origin"
     assert "set-cookie" not in r.headers
 
 
@@ -547,6 +549,8 @@ def test_the_form_is_protected_against_csrf(oc):
     fields = hidden_fields(consent(oc, client["client_id"], challenge).text)
     assert submit(oc, fields, "approve", **{"Sec-Fetch-Site": "cross-site"}).status_code == 403
     assert submit(oc, fields, "approve", Origin="https://evil.example").status_code == 403
+    assert submit(oc, fields, "approve", Origin="null").status_code == 403
+    assert submit(oc, fields, "approve", **{"Sec-Fetch-Site": "same-site"}).status_code == 403
     # A changed field breaks the form token.
     for name, value in (("redirect_uri", "https://evil.example/cb"), ("state", "other"), ("code_challenge", "y" * 43)):
         r = submit(oc, {**fields, name: value}, "approve")
@@ -728,3 +732,37 @@ def test_oauth_logs_carry_no_key_or_code(oc, caplog):
     text = caplog.text
     assert "oauth approved" in text and "oauth token issued" in text
     assert token not in text and code not in text and verifier not in text and client["client_id"] not in text
+
+
+# --- the website says what this server does ----------------------------------------------------
+
+STALE = ("no OAuth", "No OAuth", "OAuth sign-in yet", "not offer OAuth", "but not OAuth", "OAuth is not offered",
+         "Calotype takes a key in a header only")
+
+
+def site_pages(c) -> dict:
+    from calotype.pages import PAGES
+
+    return {p.path: c.get(p.path).text for p in PAGES}
+
+
+def test_with_oauth_on_the_pages_explain_it_and_claim_no_lack_of_it(oc):
+    pages = site_pages(oc)
+    for path, text in pages.items():
+        assert "<!--oauth" not in text and "<!--nooauth" not in text and "<!--/" not in text, path
+        for phrase in STALE:
+            assert phrase not in text, (path, phrase)
+    assert 'id="connectors"' in pages["/agents"] and "Connect from claude.ai or ChatGPT" in pages["/agents"]
+    assert "not yet been tried from claude.ai or ChatGPT" in pages["/agents"]  # says what was not tested
+    assert 'id="oauth"' in pages["/docs"] and "no <code>expires_in</code> and no refresh token" in pages["/docs"]
+    assert 'id="oauth"' in pages["/privacy"] and "authorization code record" in pages["/privacy"]
+    assert "sign-in with OAuth." in pages["/privacy"]
+
+
+def test_with_oauth_off_the_pages_stay_as_they_were(client):
+    pages = site_pages(client)
+    for path, text in pages.items():
+        assert "<!--oauth" not in text and "<!--nooauth" not in text, path
+    assert 'id="connectors"' not in pages["/agents"] and "OAuth sign-in yet" in pages["/agents"]
+    assert 'id="oauth"' not in pages["/docs"] and 'id="oauth"' not in pages["/privacy"]
+    assert "No OAuth" in pages["/compare/screenshot-mcp-servers"]

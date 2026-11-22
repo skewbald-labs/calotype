@@ -38,6 +38,8 @@ STRIPE_PRICE_STARTER="${STRIPE_PRICE_STARTER:-}"
 STRIPE_PRICE_PRO="${STRIPE_PRICE_PRO:-}"
 EMAIL_NOTICES=0
 EMAIL_TOKEN_SECRET_NAME="${EMAIL_TOKEN_SECRET_NAME:-calotype-email-token-secret}"
+OAUTH=0
+OAUTH_SECRET_NAME="${OAUTH_SECRET_NAME:-calotype-oauth-secret}"
 # With --stripe: STRIPE_AUTOMATIC_TAX=1 turns on Stripe Tax in Checkout. Set it only
 # once the account has a tax registration (Texas) and its head office address.
 # With --credits (which needs --stripe): prepaid credit by machine payment, POST /v1/credits.
@@ -74,6 +76,9 @@ Options:
   --email-notices              turn quota emails on: CALOTYPE_EMAIL_TOKEN_SECRET from the Secret Manager
                                secret calotype-email-token-secret (env EMAIL_TOKEN_SECRET_NAME). Pass it on
                                every deploy once on: a deploy without it removes the secret from the service
+  --oauth                      turn OAuth sign-in on /mcp on: CALOTYPE_OAUTH_SECRET from the Secret Manager
+                               secret calotype-oauth-secret (env OAUTH_SECRET_NAME). Pass it on every deploy
+                               once on, like --email-notices
   --secret-version V           Secret Manager version for the secrets (default latest)
   --skip-setup                 skip enabling APIs and creating the repository and database
   --dry-run                    print the gcloud commands, run nothing
@@ -157,6 +162,7 @@ while [[ $# -gt 0 ]]; do
     --stripe) STRIPE=1; shift ;;
     --credits) CREDITS=1; shift ;;
     --email-notices) EMAIL_NOTICES=1; shift ;;
+    --oauth) OAUTH=1; shift ;;
     --skip-setup) SKIP_SETUP=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -194,11 +200,14 @@ if [[ $STRIPE -eq 1 ]]; then
   [[ "$STRIPE_PRICE_STARTER" =~ ^price_[A-Za-z0-9]+$ ]] || die "--stripe needs STRIPE_PRICE_STARTER=price_..."
   [[ "$STRIPE_PRICE_PRO" =~ ^price_[A-Za-z0-9]+$ ]] || die "--stripe needs STRIPE_PRICE_PRO=price_..."
 fi
-if [[ $STRIPE -eq 1 || $EMAIL_NOTICES -eq 1 ]]; then
+if [[ $STRIPE -eq 1 || $EMAIL_NOTICES -eq 1 || $OAUTH -eq 1 ]]; then
   [[ "$SECRET_VERSION" =~ ^(latest|[1-9][0-9]*)$ ]] || die "--secret-version must be latest or a number"
 fi
 if [[ $EMAIL_NOTICES -eq 1 ]]; then
   [[ "$EMAIL_TOKEN_SECRET_NAME" =~ ^[A-Za-z0-9_-]{1,255}$ ]] || die "not a secret name: $EMAIL_TOKEN_SECRET_NAME"
+fi
+if [[ $OAUTH -eq 1 ]]; then
+  [[ "$OAUTH_SECRET_NAME" =~ ^[A-Za-z0-9_-]{1,255}$ ]] || die "not a secret name: $OAUTH_SECRET_NAME"
 fi
 
 if [[ $CREDITS -eq 1 ]]; then
@@ -232,7 +241,7 @@ say "# Image $IMAGE"
 
 if [[ $SKIP_SETUP -eq 0 ]]; then
   apis=(run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com firestore.googleapis.com)
-  if [[ $STRIPE -eq 1 || $EMAIL_NOTICES -eq 1 ]]; then
+  if [[ $STRIPE -eq 1 || $EMAIL_NOTICES -eq 1 || $OAUTH -eq 1 ]]; then
     apis+=(secretmanager.googleapis.com)
   fi
   run gcloud services enable "${apis[@]}" --project "$PROJECT_ID"
@@ -255,6 +264,9 @@ if [[ $SKIP_SETUP -eq 0 ]]; then
   fi
   if [[ $EMAIL_NOTICES -eq 1 ]]; then
     run gcloud secrets describe "$EMAIL_TOKEN_SECRET_NAME" --project "$PROJECT_ID" --format "value(name)"
+  fi
+  if [[ $OAUTH -eq 1 ]]; then
+    run gcloud secrets describe "$OAUTH_SECRET_NAME" --project "$PROJECT_ID" --format "value(name)"
   fi
 else
   say "# --skip-setup: APIs, repository and database are assumed to exist"
@@ -320,6 +332,10 @@ if [[ $EMAIL_NOTICES -eq 1 ]]; then
   # Signs the removal links in quota emails (calotype/notices.py). The mail key is not here:
   # the skewbald-checks job sends the emails.
   secrets+="${secrets:+,}CALOTYPE_EMAIL_TOKEN_SECRET=$EMAIL_TOKEN_SECRET_NAME:$SECRET_VERSION"
+fi
+if [[ $OAUTH -eq 1 ]]; then
+  # Signs OAuth client ids and the consent form (calotype/oauth.py). Without it OAuth is off.
+  secrets+="${secrets:+,}CALOTYPE_OAUTH_SECRET=$OAUTH_SECRET_NAME:$SECRET_VERSION"
 fi
 if [[ -n "$secrets" ]]; then
   # --set-secrets replaces the whole list, so every secret the service uses is named here.

@@ -573,8 +573,8 @@ def consent_content(
   <p>Paste it to let the app use your key instead, with its plan and its quota. Calotype checks the key and hands it to the app.</p>
   <form method="post" action="/oauth/authorize" class="upgrade">
     {hidden}
-    <label for="key">Your key</label>
-    <input id="key" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="cal_...">
+    <p><label for="key">Your key</label>
+    <input id="key" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="cal_..."></p>
     <div class="actions"><button type="submit" name="action" value="paste">Use this key</button></div>
   </form>
 
@@ -641,7 +641,9 @@ def add_oauth_routes(app: FastAPI, server: OAuthServer, *, settings, site_dir: P
                 "Content-Security-Policy": csp,
                 "X-Frame-Options": "DENY",
                 "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "no-referrer",
+                # Not no-referrer: with it, browsers send "Origin: null" on the form's POST,
+                # which the Origin check below must refuse. same-origin sends nothing to the app.
+                "Referrer-Policy": "same-origin",
                 "X-Robots-Tag": "noindex",
             },
         )
@@ -745,7 +747,7 @@ def add_oauth_routes(app: FastAPI, server: OAuthServer, *, settings, site_dir: P
         return consent_page(client, fields)
 
     async def authorize_submit(request: Request) -> Response:
-        if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        if request.headers.get("sec-fetch-site", "").lower() in ("cross-site", "same-site"):
             return problem_page("Not allowed", "This form can only be sent from Calotype's own page.", 403)
         origin = request.headers.get("origin")
         if origin and origin.rstrip("/") != server.issuer:

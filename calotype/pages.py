@@ -241,6 +241,17 @@ def sale_text(content: str, paid_open: bool) -> str:
     return keep.sub(lambda m: m.group(1), drop.sub("", content))
 
 
+# The same for OAuth sign-in on /mcp (oauth.py), which is on only where CALOTYPE_OAUTH_SECRET is set:
+# <!--oauth-->...<!--/oauth--> with it, <!--nooauth-->...<!--/nooauth--> without.
+_OAUTH = re.compile(r"<!--oauth-->(.*?)<!--/oauth-->", re.DOTALL)
+_NOOAUTH = re.compile(r"<!--nooauth-->(.*?)<!--/nooauth-->", re.DOTALL)
+
+
+def oauth_text(content: str, oauth_on: bool) -> str:
+    keep, drop = (_OAUTH, _NOOAUTH) if oauth_on else (_NOOAUTH, _OAUTH)
+    return keep.sub(lambda m: m.group(1), drop.sub("", content))
+
+
 # The home page's try box (site/try-form.html) goes where a page has this marker.
 TRY_FORM_MARK = "<!--try-form-->"
 
@@ -286,8 +297,11 @@ def render_document(
     return RenderedPage(document.encode("utf-8"), _csp(document))
 
 
-def render_page(page: Page, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits()) -> RenderedPage:
+def render_page(
+    page: Page, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False
+) -> RenderedPage:
     content = sale_text((site_dir / "pages" / page.source).read_text(encoding="utf-8"), paid_open)
+    content = oauth_text(content, oauth_on)
     content = content.replace(TRY_FORM_MARK, try_form(site_dir, tries))
     return render_document(
         site_dir, path=page.path, title=page.title, description=page.description, content=content,
@@ -307,15 +321,18 @@ def sitemap_xml() -> str:
 
 def robots_txt() -> str:
     # /try renders a page on each visit; crawlers have no reason to.
-    return f"User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /try\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
+    return f"User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /try\nDisallow: /oauth/\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
 
 
-def add_site_routes(app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits()) -> None:
+def add_site_routes(
+    app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False
+) -> None:
     """Serve every page in ``PAGES``, plus /robots.txt and /sitemap.xml (GET and HEAD).
 
     ``paid_open`` is whether this server sells paid plans (Stripe is set up); it picks the
-    sale or no-sale text in each page. ``tries`` are the limits the home page's try box states."""
-    rendered = {page.path: render_page(page, site_dir, paid_open, tries) for page in PAGES}
+    sale or no-sale text in each page. ``tries`` are the limits the home page's try box states.
+    ``oauth_on`` is whether OAuth sign-in on /mcp is on; it picks the oauth or no-oauth text."""
+    rendered = {page.path: render_page(page, site_dir, paid_open, tries, oauth_on) for page in PAGES}
 
     def page_endpoint(path: str):
         page = rendered[path]
