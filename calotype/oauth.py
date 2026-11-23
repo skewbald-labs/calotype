@@ -45,6 +45,14 @@ caught by another app on the same machine is useless.
 The consent form uses no cookie. Its hidden fields carry an HMAC over the
 request (the form token), checked again on submit, and a submit from another
 site is refused (``Sec-Fetch-Site``, ``Origin``). The page cannot be framed.
+
+The consent page is served without the site's ``form-action`` directive.
+Chromium applies ``form-action`` to every hop of the redirect that answers a
+form, not only to the form's own target, and the app's callback often
+redirects on: ``https://vscode.dev/redirect`` answers 302 to ``vscode://...``,
+``https://www.cursor.com/...`` answers 308 to ``cursor.com``, and a
+``cursor://`` redirect URI is no host a policy can name. With the directive,
+Approve made a key and the browser then stayed on the consent page.
 """
 
 from __future__ import annotations
@@ -195,11 +203,10 @@ def redirect_matches(requested: str, registered: str) -> bool:
     return (a.hostname, a.path, a.query) == (b.hostname, b.path, b.query)
 
 
-def _origin(uri: str) -> str:
-    """scheme://host[:port] of a checked redirect URI, for the consent page's form-action."""
-    parts = urlsplit(uri)
-    host = f"[{parts.hostname}]" if parts.hostname == "::1" else parts.hostname
-    return f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")
+def without_form_action(csp: str) -> str:
+    """``csp`` without its ``form-action`` directive, for the consent page (see the module docstring)."""
+    directives = (d.strip() for d in csp.split(";"))
+    return "; ".join(d for d in directives if d and d.split()[0].lower() != "form-action")
 
 
 def _with_params(uri: str, params: dict[str, str]) -> str:
@@ -641,12 +648,14 @@ def add_oauth_routes(app: FastAPI, server: OAuthServer, *, settings, site_dir: P
     async def preflight(_request: Request) -> Response:
         return Response(status_code=204, headers=_CORS)
 
-    def html_page(content: str, status: int = 200, form_origin: str = "") -> Response:
+    def html_page(content: str, status: int = 200, consent_form: bool = False) -> Response:
         doc = render_document(site_dir, path="/oauth/authorize", title=TITLE, description=DESCRIPTION, content=content)
         csp = doc.csp
-        if form_origin:
-            # The form's answer is a redirect to the app; browsers apply form-action to it.
-            csp = csp.replace("form-action 'self'", f"form-action 'self' {form_origin}")
+        if consent_form:
+            # The form's answer is a redirect to the app, and Chromium applies form-action to
+            # every hop of it; the app's later hops (vscode://, another host) cannot be listed.
+            # The forms post to this page only (a fixed action, and base-uri stays 'none').
+            csp = without_form_action(csp)
         return Response(
             doc.body,
             status_code=status,
@@ -668,9 +677,7 @@ def add_oauth_routes(app: FastAPI, server: OAuthServer, *, settings, site_dir: P
 
     def consent_page(client: Client, fields: dict[str, str], error: str = "", status: int = 200) -> Response:
         token = server.form_token(fields)
-        return html_page(
-            consent_content(client, fields, token, free_quota, error), status, _origin(fields["redirect_uri"])
-        )
+        return html_page(consent_content(client, fields, token, free_quota, error), status, consent_form=True)
 
     def back_to_client(redirect_uri: str, params: dict[str, str], state: str) -> Response:
         params = {**params, **({"state": state} if state else {}), "iss": server.issuer}
