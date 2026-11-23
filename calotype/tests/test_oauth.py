@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from calotype import oauth as oauth_module
 from calotype.app import create_app
-from calotype.oauth import OAuthServer, client_tag, redirect_matches, redirect_uri_problem
+from calotype.oauth import OAuthServer, client_tag, redirect_matches, redirect_uri_problem, without_form_action
 from calotype.ssrf import AddressPolicy
 
 from .conftest import fake_resolver, stored_text
@@ -312,19 +312,44 @@ def test_consent_page_names_the_client_and_the_redirect_host(oc, store):
     assert "Calotype has not checked it" in page  # a registered name is self-asserted
     assert "AI agent" in page  # the shared layout's disclosure
     csp = r.headers["content-security-policy"]
-    assert "frame-ancestors 'none'" in csp and "form-action 'self' https://claude.ai;" in csp
+    assert "frame-ancestors 'none'" in csp and "base-uri 'none'" in csp and "default-src 'none'" in csp
+    # No form-action here: Chromium applies it to every hop of the redirect back to the app
+    # (test_oauth_browser.py drives that in a real browser). The forms post to this page only.
+    assert "form-action" not in csp
+    assert page.count('<form method="post" action="/oauth/authorize"') == 2 and page.count("<form") == 2
     assert r.headers["x-frame-options"] == "DENY" and r.headers["cache-control"] == "no-store"
     # Not no-referrer, which makes browsers send "Origin: null" on the form's POST.
     assert r.headers["referrer-policy"] == "same-origin"
     assert "set-cookie" not in r.headers
 
 
-def test_a_loopback_client_gets_a_warning_and_its_port_in_form_action(oc):
+def test_a_loopback_client_gets_a_warning(oc):
     client = register(oc, client_name="Claude Code", redirect_uris=["http://localhost/callback"])
     _, challenge = pkce()
     r = consent(oc, client["client_id"], challenge, redirect_uri="http://localhost:3118/callback")
     assert "runs on your own computer" in r.text
-    assert "form-action 'self' http://localhost:3118;" in r.headers["content-security-policy"]
+    assert "form-action" not in r.headers["content-security-policy"]
+
+
+def test_only_the_consent_page_drops_form_action(oc):
+    client = register(oc)
+    _, challenge = pkce()
+    # The consent page shown again with an error is still the consent page.
+    again = submit(oc, hidden_fields(consent(oc, client["client_id"], challenge).text), "paste", "cal_nope")
+    assert again.status_code == 400 and 'name="form_token"' in again.text
+    assert "form-action" not in again.headers["content-security-policy"]
+    # Pages with no form to send back to the app keep the site's policy.
+    bad_client = oc.get("/oauth/authorize", params=authorize_query("c1.nope.nope", challenge))
+    no_pkce = oc.get("/oauth/authorize", params=authorize_query(client["client_id"], challenge, code_challenge_method=None))
+    for r in (bad_client, no_pkce, oc.get("/")):
+        assert "form-action 'self'" in r.headers["content-security-policy"], r.url
+
+
+def test_without_form_action_removes_that_directive_only():
+    csp = "default-src 'none'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    assert without_form_action(csp) == "default-src 'none'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+    assert without_form_action("Form-Action 'self' https://a.example ;default-src 'none'") == "default-src 'none'"
+    assert without_form_action("default-src 'none'") == "default-src 'none'"
 
 
 def test_a_bad_client_or_redirect_gets_a_page_not_a_redirect(oc):
