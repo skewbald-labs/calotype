@@ -23,6 +23,7 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 | `billing.py` | Stripe Checkout, customer portal and webhook handling (off unless the Stripe variables are set) |
 | `credits.py` | Prepaid screenshots bought by an agent through Stripe machine payments, `POST /v1/credits` (off unless `CALOTYPE_CREDITS=1` and its settings are set) |
 | `mpp.py` | The Machine Payments Protocol's wire format: the 402 challenge, the credential, the receipt |
+| `tempo.py` | Prepaid packs paid in USDC on Tempo (MPP method `tempo`), checked on the chain by the official SDK `pympp` (off unless `CALOTYPE_CREDITS_STABLECOIN=1`) |
 | `deploy/` | Cloud Build config, `deploy.sh` for Cloud Run, and the IAM roles and cost notes (`deploy/README.md`) |
 | `admin.py` | Key administration CLI |
 | `remote_mcp.py` | Remote MCP server at `/mcp` (streamable HTTP) with one tool, `screenshot` |
@@ -147,11 +148,11 @@ Quota counts one screenshot per call, per key, per calendar month in UTC. A call
 - **Paid:** the same request with the credential in `Payment-Authorization: Payment <base64url>` (the key stays in `Authorization`; with the key in `?access_key=` the credential goes in `Authorization`). The credential holds a Stripe shared payment token. Calotype creates and confirms one PaymentIntent with it and, if it succeeded, adds the pack: 200 with `credits` (the new balance) and a `Payment-Receipt` header.
 - **Once:** the purchase is stored under the PaymentIntent id in the same atomic step that adds the screenshots. The same credential again, the `payment_intent.succeeded` webhook, or a webhook replay add nothing more.
 - **Use:** the month's plan quota is used first, then credit, one per screenshot (`X-Calotype-Credits` on the response). Credit does not expire or reset. `GET /v1/usage` reports it as `credits`. Credit already bought keeps working if the endpoint is switched off again.
-- **Not built:** stablecoin payments. `CALOTYPE_CREDITS_STABLECOIN=1` only logs a warning.
+- **USDC on Tempo (off by default):** with `CALOTYPE_CREDITS_STABLECOIN=1` and `STRIPE_TEMPO_DEPOSIT_ADDRESS`, the 402 carries a second `WWW-Authenticate` challenge, method `tempo`: the price in USDC.e base units (`"19000000"`) to the Stripe deposit address on Tempo mainnet (live key) or in pathUSD on the Moderato testnet (sandbox key). The credential holds a signed transfer, which Calotype broadcasts, or the hash of one the buyer broadcast. After the same challenge checks as a card, `pympp`'s `ChargeIntent` checks it on the chain (chain, token, recipient, amount, a memo bound to the challenge, single use). The pack is credited under the transaction hash, then recorded in Stripe as a crypto PaymentIntent (`transaction_verification`). `payment.reference` and the receipt carry the hash. See `tempo.py`.
 
-A key may send 10 payment credentials an hour (`CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR`; in memory, per instance), because each one that passes the checks makes a call to Stripe; asking for a challenge is not limited.
+A key may send 10 payment credentials an hour (`CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR`; in memory, per instance), because each one that passes the checks makes a call to Stripe or the Tempo network; asking for a challenge is not limited.
 
-Errors: 400 `invalid_pack`, `invalid_json`; 429 `rate_limited`; 402 `payment_required`, and for a refused credential `malformed_credential`, `invalid_challenge`, `payment_expired`, `verification_failed`, each with a new challenge; 502 `payment_unconfirmed` (Stripe gave no answer; the same credential may be sent again), `billing_error`; 503 `billing_unavailable`. Settings, the steps a person must take in Stripe, what is unverified, and refunds are in `deploy/README.md`, "Prepaid credit". The sandbox run is in `deploy/stripe-sandbox/README.md`.
+Errors: 400 `invalid_pack`, `invalid_json`; 429 `rate_limited`; 402 `payment_required`, and for a refused credential `malformed_credential`, `invalid_challenge`, `payment_expired`, `verification_failed`, each with a new challenge; 502 `payment_unconfirmed` (Stripe or the Tempo network gave no answer; the same credential may be sent again), `billing_error`; 503 `billing_unavailable`. Settings, the steps a person must take in Stripe, what is unverified, and refunds are in `deploy/README.md`, "Prepaid credit". The sandbox run is in `deploy/stripe-sandbox/README.md`.
 
 ## How SSRF is blocked
 
@@ -294,7 +295,7 @@ calotype/deploy/deploy.sh --dry-run --project PROJECT_ID \
 ## Known gaps
 
 - Billing is tested against a mocked Stripe client. Live Stripe has run since 17 November 2026; a server without Stripe settings keeps billing off (503). `plans.json` prices must be kept equal to the Stripe Prices by hand.
-- Prepaid credit (`credits.py`) is tested against a mocked Stripe client and the protocol's published examples only. It has never run against Stripe, sandbox or live, or been paid by a real wallet. Stablecoin payment is not built. `deploy/README.md` lists what is unverified.
+- Prepaid credit (`credits.py`) is tested against a mocked Stripe client and the protocol's published examples only. It has never run against Stripe, sandbox or live, or been paid by a real wallet. Stablecoin payment (`tempo.py`) ran once end to end in the Stripe sandbox on the Tempo testnet (2026-11-23), never in live mode. `deploy/README.md` lists what is unverified.
 - The Stripe processed-event list grows without bound (one small row per event). Firestore TTL or a periodic delete can trim it later. So do quota-notice records (at most two per key per month), until the key is deleted.
 - `admin remove-email ADDRESS` matches the address as stored: the domain in any case, the local part exactly.
 - A removal link is a GET that acts at once, as asked. A mail scanner that opens links could remove an address; the holder can add it again.

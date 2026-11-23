@@ -46,6 +46,12 @@ OAUTH_SECRET_NAME="${OAUTH_SECRET_NAME:-calotype-oauth-secret}"
 # STRIPE_PROFILE_ID is the Stripe profile id (profile_...); it is not a secret.
 CREDITS=0
 STRIPE_PROFILE_ID="${STRIPE_PROFILE_ID:-}"
+# With --stablecoin (which needs --credits): packs can also be paid in USDC on Tempo.
+# STRIPE_TEMPO_DEPOSIT_ADDRESS is the Stripe crypto deposit address on Tempo (0x...; not a secret;
+# `python -m calotype.admin tempo-deposit-address` prints it). CALOTYPE_TEMPO_RPC_URL is optional.
+STABLECOIN=0
+STRIPE_TEMPO_DEPOSIT_ADDRESS="${STRIPE_TEMPO_DEPOSIT_ADDRESS:-}"
+CALOTYPE_TEMPO_RPC_URL="${CALOTYPE_TEMPO_RPC_URL:-}"
 DRY_RUN=0
 SKIP_SETUP=0
 
@@ -71,8 +77,10 @@ Options:
                                STRIPE_PRICE_STARTER and STRIPE_PRICE_PRO (environment)
                                (STRIPE_AUTOMATIC_TAX=1 also turns on Stripe Tax in Checkout)
   --credits                    with --stripe: turn on POST /v1/credits (prepaid credit by machine
-                               payment, cards only). Needs STRIPE_PROFILE_ID=profile_... (environment).
+                               payment, by card). Needs STRIPE_PROFILE_ID=profile_... (environment).
                                Read deploy/README.md, "Prepaid credit", before using it
+  --stablecoin                 with --credits: also take USDC on Tempo (MPP method tempo). Needs
+                               STRIPE_TEMPO_DEPOSIT_ADDRESS=0x... (environment). Off without it
   --email-notices              turn quota emails on: CALOTYPE_EMAIL_TOKEN_SECRET from the Secret Manager
                                secret calotype-email-token-secret (env EMAIL_TOKEN_SECRET_NAME). Pass it on
                                every deploy once on: a deploy without it removes the secret from the service
@@ -161,6 +169,7 @@ while [[ $# -gt 0 ]]; do
     --secret-version=*) SECRET_VERSION="${1#*=}"; shift ;;
     --stripe) STRIPE=1; shift ;;
     --credits) CREDITS=1; shift ;;
+    --stablecoin) STABLECOIN=1; shift ;;
     --email-notices) EMAIL_NOTICES=1; shift ;;
     --oauth) OAUTH=1; shift ;;
     --skip-setup) SKIP_SETUP=1; shift ;;
@@ -213,6 +222,15 @@ fi
 if [[ $CREDITS -eq 1 ]]; then
   [[ $STRIPE -eq 1 ]] || die "--credits needs --stripe (the same Stripe secret key takes the payment)"
   [[ "$STRIPE_PROFILE_ID" =~ ^profile_[A-Za-z0-9_]+$ ]] || die "--credits needs STRIPE_PROFILE_ID=profile_..."
+fi
+if [[ $STABLECOIN -eq 1 ]]; then
+  [[ $CREDITS -eq 1 ]] || die "--stablecoin needs --credits (cards stay on beside it)"
+  [[ "$STRIPE_TEMPO_DEPOSIT_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] \
+    || die "--stablecoin needs STRIPE_TEMPO_DEPOSIT_ADDRESS=0x... (python -m calotype.admin tempo-deposit-address)"
+  if [[ -n "$CALOTYPE_TEMPO_RPC_URL" ]]; then
+    [[ "$CALOTYPE_TEMPO_RPC_URL" =~ ^https://[^[:space:],/]+(/[^[:space:],]*)?$ ]] \
+      || die "CALOTYPE_TEMPO_RPC_URL must be an https:// address without commas"
+  fi
 fi
 
 if [[ -z "$TAG" ]]; then
@@ -320,8 +338,14 @@ if [[ $STRIPE -eq 1 ]]; then
     env_vars+=",STRIPE_AUTOMATIC_TAX=$STRIPE_AUTOMATIC_TAX"
   fi
   if [[ $CREDITS -eq 1 ]]; then
-    # Cards through shared payment tokens only; the stablecoin method is not built.
+    # Cards through shared payment tokens, always; USDC on Tempo only with --stablecoin.
     env_vars+=",CALOTYPE_CREDITS=1,CALOTYPE_CREDITS_CARD=1,STRIPE_PROFILE_ID=$STRIPE_PROFILE_ID"
+    if [[ $STABLECOIN -eq 1 ]]; then
+      env_vars+=",CALOTYPE_CREDITS_STABLECOIN=1,STRIPE_TEMPO_DEPOSIT_ADDRESS=$STRIPE_TEMPO_DEPOSIT_ADDRESS"
+      if [[ -n "$CALOTYPE_TEMPO_RPC_URL" ]]; then
+        env_vars+=",CALOTYPE_TEMPO_RPC_URL=$CALOTYPE_TEMPO_RPC_URL"
+      fi
+    fi
   fi
   secrets="STRIPE_SECRET_KEY=$STRIPE_KEY_SECRET:$SECRET_VERSION,STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET_NAME:$SECRET_VERSION"
 else

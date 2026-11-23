@@ -813,3 +813,38 @@ def test_challenge_expiry_is_five_minutes(tclient, store):
     raw, _ = store.create_key("free")
     expires = datetime.fromisoformat(tempo_params(ask(tclient, raw))["expires"].replace("Z", "+00:00"))
     assert timedelta(minutes=4) < expires - datetime.now(UTC) <= timedelta(minutes=5)
+
+
+# --- the site says what this server offers ---------------------------------------------------------------
+
+
+def site_text(c) -> dict[str, str]:
+    from calotype.pages import PAGES
+
+    texts = {p.path: c.get(p.path).text for p in PAGES}
+    texts["/llms.txt"] = c.get("/llms.txt").text
+    return texts
+
+
+def test_with_usdc_on_the_pages_describe_it(settings, store, fake_renderer, tcredits):
+    with make_client(settings, store, fake_renderer, tcredits, serve_site=True) as c:
+        texts = site_text(c)
+    for path, text in texts.items():
+        assert "<!--usdc" not in text and "<!--nousdc" not in text and "<!--/usdc" not in text, path
+    assert 'method="tempo"' in texts["/docs"] and "Stablecoin payment is not offered" not in texts["/docs"]
+    assert "USDC on Tempo" in texts["/pricing"] and "Tempo network" in texts["/agents"]
+    assert "method `tempo`" in texts["/llms.txt"]
+    assert "USDC.e on the Tempo network" in texts["/terms"]
+    assert "to the wallet address the payment came from" in texts["/refunds"]
+    assert "transaction hash" in texts["/privacy"] and "Tempo network, which is public" in texts["/privacy"]
+
+
+def test_with_usdc_off_the_pages_do_not_offer_it(settings, store, fake_renderer, payments):
+    config, _ = CreditsConfig.from_env(CREDITS_ENV)
+    with make_client(settings, store, fake_renderer, StripeCredits(config, client=payments.client),
+                     serve_site=True) as c:
+        texts = site_text(c)
+    for path, text in texts.items():
+        assert "<!--usdc" not in text and "<!--nousdc" not in text, path
+        assert "USDC" not in text and "Tempo" not in text, path
+    assert "Stablecoin payment is not offered on this server." in texts["/docs"]

@@ -252,6 +252,17 @@ def oauth_text(content: str, oauth_on: bool) -> str:
     return keep.sub(lambda m: m.group(1), drop.sub("", content))
 
 
+# The same for prepaid packs paid in USDC on Tempo (tempo.py), on only where CALOTYPE_CREDITS_STABLECOIN
+# is set and the method is offered: <!--usdc-->...<!--/usdc--> with it, <!--nousdc-->...<!--/nousdc--> without.
+_USDC = re.compile(r"<!--usdc-->(.*?)<!--/usdc-->", re.DOTALL)
+_NOUSDC = re.compile(r"<!--nousdc-->(.*?)<!--/nousdc-->", re.DOTALL)
+
+
+def usdc_text(content: str, usdc_on: bool) -> str:
+    keep, drop = (_USDC, _NOUSDC) if usdc_on else (_NOUSDC, _USDC)
+    return keep.sub(lambda m: m.group(1), drop.sub("", content))
+
+
 # The home page's try box (site/try-form.html) goes where a page has this marker.
 TRY_FORM_MARK = "<!--try-form-->"
 
@@ -346,10 +357,10 @@ def render_document(
 
 def render_page(
     page: Page, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False,
-    free_quota: int | None = None,
+    free_quota: int | None = None, usdc_on: bool = False,
 ) -> RenderedPage:
     content = sale_text((site_dir / "pages" / page.source).read_text(encoding="utf-8"), paid_open)
-    content = oauth_text(content, oauth_on)
+    content = usdc_text(oauth_text(content, oauth_on), usdc_on)
     content = content.replace(TRY_FORM_MARK, try_form(site_dir, tries))
     content = content.replace(KEY_FORM_MARK, key_form(site_dir, free_quota))
     return render_document(
@@ -373,25 +384,29 @@ def robots_txt() -> str:
     return f"User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /try\nDisallow: /oauth/\n\nSitemap: {SITE_ORIGIN}/sitemap.xml\n"
 
 
-def llms_txt(site_dir: Path, paid_open: bool = True, oauth_on: bool = False) -> str:
+def llms_txt(site_dir: Path, paid_open: bool = True, oauth_on: bool = False, usdc_on: bool = False) -> str:
     """``/llms.txt`` (https://llmstxt.org): what Calotype is, for a model, in plain Markdown.
 
     Not in the sitemap, which lists the HTML pages; like /robots.txt it sits at a fixed path."""
-    return oauth_text(sale_text((site_dir / "llms.txt").read_text(encoding="utf-8"), paid_open), oauth_on)
+    text = oauth_text(sale_text((site_dir / "llms.txt").read_text(encoding="utf-8"), paid_open), oauth_on)
+    return usdc_text(text, usdc_on)
 
 
 def add_site_routes(
     app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False,
-    free_quota: int | None = None,
+    free_quota: int | None = None, usdc_on: bool = False,
 ) -> None:
     """Serve every page in ``PAGES``, plus /robots.txt, /sitemap.xml and /llms.txt (GET and HEAD).
 
     ``paid_open`` is whether this server sells paid plans (Stripe is set up); it picks the
     sale or no-sale text in each page. ``tries`` are the limits the home page's try box states.
     ``oauth_on`` is whether OAuth sign-in on /mcp is on; it picks the oauth or no-oauth text.
+    ``usdc_on`` is whether prepaid packs can be paid in USDC on Tempo; it picks the usdc or no-usdc text.
     ``free_quota`` is the free plan's monthly quota where a visitor can make a key, for the
     "Get a free key" button (``key_form``); None leaves the button out."""
-    rendered = {page.path: render_page(page, site_dir, paid_open, tries, oauth_on, free_quota) for page in PAGES}
+    rendered = {
+        page.path: render_page(page, site_dir, paid_open, tries, oauth_on, free_quota, usdc_on) for page in PAGES
+    }
 
     def page_endpoint(path: str):
         page = rendered[path]
@@ -422,8 +437,10 @@ def add_site_routes(
     app.add_route("/robots.txt", text_endpoint(robots_txt(), "text/plain; charset=utf-8"), include_in_schema=False)
     app.add_route("/sitemap.xml", text_endpoint(sitemap_xml(), "application/xml"), include_in_schema=False)
     if (site_dir / "llms.txt").is_file():
-        app.add_route("/llms.txt", text_endpoint(llms_txt(site_dir, paid_open, oauth_on), "text/plain; charset=utf-8"),
-                      include_in_schema=False)
+        app.add_route(
+            "/llms.txt", text_endpoint(llms_txt(site_dir, paid_open, oauth_on, usdc_on), "text/plain; charset=utf-8"),
+            include_in_schema=False,
+        )
     for path, (data, media_type) in {**brand_files(site_dir), **image_files(site_dir)}.items():
         app.add_route(path, file_endpoint(data, media_type), include_in_schema=False)
 

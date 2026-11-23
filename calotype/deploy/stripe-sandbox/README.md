@@ -77,3 +77,23 @@ curl https://api.stripe.com/v1/test_helpers/shared_payment/granted_tokens \
 11. Run the protocol's own validator with the sandbox key, so that its payment step runs too (without a key it only checks the challenge, which passed locally on 2026-11-20): `MPPX_STRIPE_SECRET_KEY=sk_test_... npx mppx@0.21.1 validate $HOST --endpoint POST:/v1/credits --body '{"pack": "starter"}' -H "Authorization:Bearer $KEY" --yes`. Left unset, it looks for a key in a logged-in Stripe CLI (`stripe config --list`); set the variable so it uses the sandbox key and no other.
 
 To test with a wallet instead of the helper, `npx @stripe/link-cli mpp pay $HOST/v1/credits -X POST -d '{"pack": "starter"}' --context "..."` pays from a personal Link account. That is a person's account and real money in live mode; it is the founder's call.
+
+## Tempo: prepaid credit paid in USDC (`--stablecoin`), run on 2026-11-23
+
+Run twice, end to end, with no real money: Calotype on 127.0.0.1 (SQLite) with the sandbox key and stablecoin payment on; the buyer was `pympp` 0.26.0's own client with a throwaway wallet on the Moderato testnet (chain 42431), funded from its public faucet (`tempo_fundAddress`), paying in pathUSD. `tempo_e2e.py` is the script; it prints no secret and keeps the wallet key outside the repository.
+
+| What | Id |
+|---|---|
+| Tempo deposit address (sandbox) | `cda_1Uf3uGCOtiY7WH748kv7z8ec`, `0x5ff8d73e8bccd3701c9aef78389f3b9771172b5c`, supported token `usdc` at `0x20C0...0000` (pathUSD) |
+| Stripe profile (sandbox) | `profile_test_61VmFWRAhnb59EggiA6VmFWQK2SQlDF8WC0U0o8R6RQ8` |
+| First purchase | transaction `0x4954653fb3fb98ca1dd8e82501a24b83880fbe011bcb2f3771d18d611fd89922`, PaymentIntent `pi_3Uf4EtCOtiY7WH740NwLApgj`, refund `pyr_1Uf4FICOtiY7WH7487HpQGfT` |
+| Second purchase (`tempo_e2e.py --refund`) | transaction `0xd1021e8e620763646ac634ebd1e3736d85ce61ec888dd2ee3c3b7db7b28989df`, PaymentIntent `pi_3Uf4JeCOtiY7WH741Lpo8VyW`, charge `py_3Uf4JeCOtiY7WH741MQ2gQDK`, refund `pyr_1Uf4JrCOtiY7WH74LyH84QHC` |
+
+What it showed:
+
+- The sandbox account creates a Tempo deposit address with `Stripe-Version: 2026-07-29.preview` without any Dashboard step.
+- The 402 carried both challenges; the SDK's client chose `tempo`, signed a 19 pathUSD `transferWithMemo` (pull mode), Calotype checked and broadcast it through the SDK and answered 200 with 5,000 credits and the hash as `payment.reference`. The wallet paid 19 pathUSD and 0.000029 in fees.
+- Stripe accepted the `transaction_verification` PaymentIntent for a testnet transaction: `processing` at once, `succeeded` within 10 seconds. Its charge records `payment_method_details.crypto` with `buyer_address`, `network: tempo`, `token_currency: usdc` and the hash.
+- A refund through the PaymentIntent (`StripeCredits.refund`, what `refund-credit` calls) went from `pending` to `succeeded`, with `destination_details.type: crypto` and no on-chain reference: in the sandbox no testnet coins came back to the wallet.
+
+Not run here: the `payment_intent.succeeded` webhook for a Tempo payment (the sandbox webhook points at `calotype-sandbox`, which was not deployed), a push-mode (hash) credential against the real chain, and anything in live mode.

@@ -949,6 +949,7 @@ def create_app(
     if browser_pages is not None:
         add_site_routes(
             app, SITE_DIR, paid_open=billing.configured, tries=try_limits, oauth_on=oauth is not None,
+            usdc_on="tempo" in getattr(credits, "methods", ()),
             free_quota=browser_pages.free_quota,
         )
         # The home page's try box: a capture with no key, under its own limits.

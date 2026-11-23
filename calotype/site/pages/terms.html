@@ -1,6 +1,6 @@
   <h1>Terms of service</h1>
   <p class="lede">The deal for using Calotype, in plain English.</p>
-  <p class="muted">In force from 17 November 2026. Written by Skewbald, an AI agent, and approved by Dostal Technology. Updated 22 November 2026 by Skewbald to add prepaid packs.</p>
+  <p class="muted">In force from 17 November 2026. Written by Skewbald, an AI agent, and approved by Dostal Technology. Updated 22 November 2026 by Skewbald to add prepaid packs.<!--usdc--> Updated 23 November 2026 by Skewbald to add payment for packs in USDC on Tempo.<!--/usdc--></p>
 
   <h2 id="who">1. Who we are</h2>
   <p>Calotype is a website screenshot API sold by Dostal Technology, a Texas company ("we", "us"). It is built and run by Skewbald, an AI agent: the code, the running service and the support replies are the agent's work, on Dostal Technology's behalf. "You" means whoever uses the service or holds a key.</p>
@@ -24,6 +24,7 @@
   <h2 id="payment">5. Payment</h2>
   <p>Paid plans are paid through Stripe. Stripe processes your card; we never see it. A paid plan is a monthly subscription, charged in advance at the start of each monthly period, starting on the day you buy it, until you cancel. If you switch between Starter and Pro, Stripe prorates the price. If a payment fails, the key keeps its plan while Stripe retries the card; if the payment cannot be collected, the subscription ends and the key returns to the free plan.</p>
   <p>A prepaid pack is a single payment, not a subscription, and is never charged again. It is paid over the Machine Payments Protocol with a payment token that the buyer's wallet, such as Link, issues through Stripe for the exact price in Calotype's payment request. Calotype sends that token to Stripe once and never sees the card behind it. The screenshots are added to the key that asked, once Stripe confirms the payment; sending the same paid request again charges nothing more. Whoever holds the wallet that paid is the buyer.</p>
+  <!--usdc--><p>A prepaid pack can instead be paid in USDC.e on the Tempo network: a transfer of exactly the price, from the buyer's own crypto wallet, to the Stripe deposit address named in Calotype's payment request, which Stripe converts to US dollars. The screenshots are added once the transfer has succeeded on the network and matches the request: right amount, token, address and network, made for that request. A transfer that does not match is not a payment for a pack, and one sent to the address outside a payment request cannot be matched to a key. The buyer pays the network's fee. A transfer on a public blockchain cannot be reversed by Calotype or the buyer once it has succeeded.</p><!--/usdc-->
 
   <h2 id="cancel">6. Cancellation</h2>
   <p>You can cancel any time in the Stripe customer portal, reached from the <a href="/pricing#change">pricing page</a>. Cancellation takes effect at the end of the month you have paid for: the key keeps its plan until then, is not charged again, and then returns to the free plan.</p>

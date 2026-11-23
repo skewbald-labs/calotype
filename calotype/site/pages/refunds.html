@@ -1,6 +1,6 @@
   <h1>Refund policy</h1>
   <p class="lede">Short, so you know where you stand before you pay.</p>
-  <p class="muted">In force from 17 November 2026. Written by Skewbald, an AI agent, and approved by Dostal Technology. Updated 22 November 2026 by Skewbald to add prepaid packs. Part of the <a href="/terms">terms of service</a>.</p>
+  <p class="muted">In force from 17 November 2026. Written by Skewbald, an AI agent, and approved by Dostal Technology. Updated 22 November 2026 by Skewbald to add prepaid packs.<!--usdc--> Updated 23 November 2026 by Skewbald for packs paid in USDC.<!--/usdc--> Part of the <a href="/terms">terms of service</a>.</p>
 
   <h2 id="cancel">Cancel any time</h2>
   <p>You can cancel a paid plan whenever you like, in the Stripe customer portal reached from the <a href="/pricing#change">pricing page</a>. Cancellation takes effect at the end of the month you have paid for. Until then the key keeps its plan; after that it is not charged again and goes back to the free plan.</p>
@@ -14,9 +14,10 @@
 
   <h2 id="packs">Prepaid packs</h2>
   <p>Within 7 days of buying a prepaid pack, you can have back the share of its price that matches the pack's unused screenshots: all of it if none were used. The refund takes those screenshots off the key and goes back, through Stripe, to the card or wallet that paid. After 7 days packs are not refunded, but they never expire, so nothing you paid for is lost.</p>
+  <!--usdc--><p>A pack paid in USDC on Tempo is refunded through Stripe in stablecoins, to the wallet address the payment came from, as Stripe does for every stablecoin payment. If you paid from an exchange or a wallet shared with others, the refund may not reach you there; say so when you ask, before it is sent. A refund that reached the paying address is complete.</p><!--/usdc-->
 
   <h2 id="how">How to ask</h2>
-  <p>Email <a href="mailto:skewbald@agentmail.to?subject=Refund">skewbald@agentmail.to</a> from the email address on your Stripe receipt, with "Refund" in the subject. Include the receipt number if you have it. For a prepaid pack, which may have no emailed receipt, include the payment reference from the purchase answer (it starts with <code>pi_</code>) or the key's <code>key_ref</code> from <code>GET /v1/usage</code>. Never send your API key by email for a refund; it is not needed.</p>
+  <p>Email <a href="mailto:skewbald@agentmail.to?subject=Refund">skewbald@agentmail.to</a> from the email address on your Stripe receipt, with "Refund" in the subject. Include the receipt number if you have it. For a prepaid pack, which may have no emailed receipt, include the payment reference from the purchase answer (it starts with <code>pi_</code><!--usdc-->, or <code>0x</code> for USDC<!--/usdc-->) or the key's <code>key_ref</code> from <code>GET /v1/usage</code>. Never send your API key by email for a refund; it is not needed.</p>
 
   <h2 id="law">Your rights under the law</h2>
   <p>Nothing here takes away a right to a refund that the law gives you.</p>

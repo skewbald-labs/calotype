@@ -37,6 +37,8 @@ Billing is off unless you pass `--stripe`. Without it the service has no secret 
 
 Status: written and tested against a mocked Stripe on 2026-11-20. Never run against Stripe, sandbox or live. Off everywhere.
 
+Stablecoin payment (USDC on Tempo, MPP method `tempo`, `tempo.py`): built on 2026-11-23, off by default and off in production. Run once end to end in the Stripe sandbox on the Tempo testnet, with the official SDK as the buyer (see `stripe-sandbox/README.md`, "Tempo"). Never run in live mode.
+
 An agent buys a pack of screenshots (one pack: 5,000 for $19, in `plans.json` under `credit_packs`) with no person and no checkout page, over the Machine Payments Protocol (MPP). `credits.py` describes the flow and `mpp.py` the wire format. It is off unless every required setting below is present; then `/v1/credits` answers 402 challenges instead of 503.
 
 ### Settings
@@ -54,9 +56,13 @@ An agent buys a pack of screenshots (one pack: 5,000 for $19, in `plans.json` un
 | `STRIPE_MPP_API_VERSION` | no | default `2026-07-29.preview`, the version `mppx` 0.21.1 sends |
 | `STRIPE_SPT_PAYMENT_METHOD_TYPES` | no | default `card,link` |
 | `CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR` | no | default 10. Payment credentials one key may send in an hour; each one that passes the checks is a call to Stripe. Counted in memory, per instance. Over it: 429 `rate_limited` |
-| `CALOTYPE_CREDITS_STABLECOIN` | no | **not built.** `1` only logs a warning at startup; nothing is offered for it |
+| `CALOTYPE_CREDITS_STABLECOIN` | no | `1` also offers USDC on Tempo: a second challenge, `method="tempo"`, in every 402. Needs `CALOTYPE_CREDITS_CARD` and the address below; if either is missing the whole endpoint stays off (logged at startup) |
+| `STRIPE_TEMPO_DEPOSIT_ADDRESS` | with the above | the Stripe crypto deposit address on Tempo, `0x...`. Not a secret; buyers see it in every tempo challenge. `python -m calotype.admin tempo-deposit-address [--create]` prints it |
+| `CALOTYPE_TEMPO_RPC_URL` | no | an `https://` Tempo node to use instead of the public one (`rpc.tempo.xyz` live, `rpc.moderato.tempo.xyz` sandbox) |
 
-Deploy: `STRIPE_PROFILE_ID=profile_... deploy.sh --stripe --credits --public-url https://HOST ...` adds `CALOTYPE_CREDITS=1`, `CALOTYPE_CREDITS_CARD=1` and `STRIPE_PROFILE_ID` to the service. Without `--credits` the service is deployed exactly as before.
+Deploy: `STRIPE_PROFILE_ID=profile_... deploy.sh --stripe --credits --public-url https://HOST ...` adds `CALOTYPE_CREDITS=1`, `CALOTYPE_CREDITS_CARD=1` and `STRIPE_PROFILE_ID` to the service. Without `--credits` the service is deployed exactly as before. Add `--stablecoin` with `STRIPE_TEMPO_DEPOSIT_ADDRESS=0x...` (and optionally `CALOTYPE_TEMPO_RPC_URL`) in the environment to add `CALOTYPE_CREDITS_STABLECOIN=1` and the address. Like the other flags, pass it on every deploy once it is on.
+
+The network follows the Stripe key and cannot be set: a live key (no `_test_` in it, as Stripe's sample decides) takes Tempo mainnet, chain 4217, and USDC.e (`0x20C0...8b50`); a sandbox key takes the Moderato testnet, chain 42431, and pathUSD (`0x20c0...0000`), the token a sandbox deposit address lists. A live server can therefore never accept testnet coins.
 
 ### What a person has to do in Stripe first
 
@@ -70,12 +76,19 @@ Each of these binds the company, so the founder does them or approves them. Sour
 6. **Update Calotype's own terms, refund policy and privacy notice** for prepaid packs (no expiry, what a refund returns, that a purchase record with the Stripe payment id is kept). The site pages say "not yet live" until then; `site/pages/terms.html`, `refunds.html` and `privacy.html` were not changed.
 7. Optional: email machine-payments@stripe.com for a Stripe Directory listing. https://docs.stripe.com/payments/machine
 
-Only for stablecoins, which are not built: request the **Stablecoins and Crypto** payment method in the Dashboard (Stripe reviews it; not available to New York businesses), and create a Tempo deposit address with `POST /v1/crypto/deposit_addresses`.
+Only for stablecoins (`--stablecoin`), in live mode, each by a person:
+
+8. **Request the Stablecoins and Crypto payment method** in the live Dashboard (Settings, Payment methods). Stripe reviews it and may ask about the business; it shows as Pending until approved. "Stablecoin payments are available to businesses in all US states, except New York." If it should apply to machine payments only, create a separate payment method configuration for them (https://docs.stripe.com/payments/machine/x402, "Before you begin"). Until it is approved, `tempo-deposit-address --create` is expected to be refused in live mode.
+9. **Create the live deposit address**: `STRIPE_SECRET_KEY=<live key> python -m calotype.admin tempo-deposit-address --create`, then deploy with `--stablecoin` and that address. The deposit address and the key must be the same account.
+10. **Decide on refunds to exchange wallets.** Stripe returns a stablecoin refund to the sending address; if the buyer paid from an exchange or omnibus wallet they may not recover it (https://docs.stripe.com/payments/deposit-mode-stablecoin-payments, "Refunds"). `refund-credit` warns; the refund policy says so.
+11. **Approve the terms, refund policy and privacy notice text for USDC.** It is written and shows only where the method is on (`<!--usdc-->` sections); read it before switching on.
 
 ### How it was built, and what is not verified
 
 - **No Node sidecar.** Stripe's guide uses the Node package `mppx`. The protocol is documented (https://mpp.dev/protocol, https://paymentauth.org) and has an official Python SDK, `pympp`. Calotype implements the card method's wire format itself in `mpp.py`, about 300 lines with no new dependency, and its tests check it against the specifications' own examples and, when `pympp` is installed, against that SDK as parser, verifier and paying client. `pympp` is not a runtime dependency: it had 12 releases in the four weeks before this was written, and its Stripe extra pulls in a blockchain stack.
-- **Stablecoins are not built.** Accepting Tempo USDC means verifying or broadcasting the buyer's signed transaction, a replay store shared by all instances, and recording the payment in Stripe as a crypto PaymentIntent. `pympp` does this (`mpp.methods.stripe.machine_payments`). Rebuilding it by hand, untested against a chain, would be guessing with money. To add it: depend on `pympp[stripe]`, give it a Firestore-backed replay store, and test on Tempo's testnet with a sandbox deposit address.
+- **Stablecoins use the SDK, not code of ours, for the chain.** `pympp[tempo]` 0.26.0 is a runtime dependency (with pytempo, web3 and the eth-* packages). `tempo.py` builds the challenge's `request` and hands each tempo credential, after Calotype's own challenge checks, to the SDK's `ChargeIntent` (`validate`, then `broadcast`), with a replay store in Calotype's storage (`payment_claims`, Firestore or SQLite) shared by every instance. The SDK checks the chain id, token, recipient, amount, a memo bound to the challenge id and realm, and single use; it broadcasts a signed transaction (pull) or looks up a hash the buyer broadcast (push). The pack is then credited under the transaction hash, and the payment recorded in Stripe the way `pympp`'s Stripe recorder does it: a PaymentIntent with `payment_method_data[type]=crypto`, `payment_method_types[]=crypto`, `payment_method_options[crypto][mode]=transaction_verification` and the network and hash, idempotency key `calotype_tempo_<hash>`. The 402 names no fee payer, so the buyer pays the network fee; Stripe's `hostedFeePayer` (live mode only, through `mppx`) is not used.
+- **The credit does not wait for Stripe.** A transfer that succeeded on the chain is final, so the pack is credited before Stripe is asked. If Stripe's record fails, the log says `tempo payment not recorded in stripe`; it is tried again when the buyer resends the credential, and `python -m calotype.admin record-tempo 0x...` does it by hand. `credits KEY_ID` marks such purchases `payment_intent=NONE`. In the sandbox the PaymentIntent was `processing`, then `succeeded` within ten seconds. Whether Stripe pays out a deposit it has no PaymentIntent for is not documented; do not leave one unrecorded.
+- **Not verified in live mode:** a payment with real USDC.e on mainnet; how long a live `transaction_verification` PaymentIntent stays `processing`; that a live refund reaches the sending wallet (the sandbox refund succeeded with no on-chain transfer); Stripe's fee on these payments.
 - **Two documented forms of the PaymentIntent call disagree.** `mppx`, `pympp` and the IETF draft send the token as top-level `shared_payment_granted_token` with version `2026-07-29.preview`. Stripe's shared payment tokens page shows `payment_method_data[shared_payment_granted_token]` with `2026-09-30.preview`. Calotype sends the first form, the one Stripe's MPP guide runs. If the sandbox refuses it, try `STRIPE_MPP_API_VERSION=2026-09-30.preview`; the parameter's place is a one-line change in `credits.py` (`_charge`).
 - **Not verified against Stripe at all:** that the account accepts the preview version; what Stripe answers for a used, expired or wrong-seller token (assumed: a 400, which becomes a 402 with a new challenge); whether a replayed idempotent request carries `Idempotent-Replayed: true` on this endpoint (assumed, as documented for the API in general).
 - **Not verified with a real wallet:** `link-cli mpp pay`. In particular whether it honours a challenge's `header="Payment-Authorization"`. If it only sends `Authorization: Payment`, the buyer puts the key in the address (`/v1/credits?access_key=cal_...`) and the challenge then asks for `Authorization`; both forms are tested here.
@@ -91,6 +104,8 @@ python -m calotype.admin refund-credit pi_... --yes     # take back the unused c
 python -m calotype.admin refund-credit pi_... --yes --prorated    # refund only the unused share of the price
 python -m calotype.admin refund-credit pi_... --yes --no-stripe   # credit only; refund by hand in the Dashboard
 ```
+
+A purchase paid in USDC is named by its transaction hash (`refund-credit 0x... --yes`) and refunded through the PaymentIntent that records it; Stripe sends stablecoins back to the paying wallet. If Stripe has no PaymentIntent for it, the command refuses and changes nothing: run `record-tempo 0x...` first. Calotype holds no wallet, so there is no other way to send coins back.
 
 It needs `STRIPE_SECRET_KEY` and the storage settings in the environment, like `revoke-key`. The credit goes first, then the money: the purchase is marked refunded and its unused credit removed in one step (the pack's size or the key's whole balance, whichever is smaller; screenshots already taken stay taken), then Stripe refunds the PaymentIntent with the idempotency key `calotype_credit_refund_<pi id>`. If Stripe fails, run the same command again: the credit is not taken twice and the money is not returned twice. A refund made in the Dashboard does not touch the credit; follow it with `refund-credit pi_... --yes --no-stripe`.
 
