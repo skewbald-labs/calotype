@@ -627,6 +627,16 @@ def test_readme_first_screen_matches_the_generated_links_and_the_served_image():
 # --- free tries ------------------------------------------------------------------------------
 
 
+def test_privacy_says_what_the_logs_hold_about_the_calling_software(site):
+    privacy = site.get("/privacy").text
+    assert "the first word of its <code>User-Agent</code> header" in privacy
+    assert "a coarse kind (browser, bot or tool)" in privacy
+    assert "the name and version the client reports about itself" in privacy
+    assert "The rest of the <code>User-Agent</code> header is never logged or kept." in privacy
+    assert "or your request headers, apart from the one word" in privacy
+    assert privacy.count("23 November 2026") == 1 and "the name of the calling software in the logs" in privacy
+
+
 def test_free_tries_in_docs_and_policies_match_the_code(site, settings):
     from calotype import tries
 

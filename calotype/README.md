@@ -264,7 +264,7 @@ No secrets are needed to run the API. OAuth sign-in needs `CALOTYPE_OAUTH_SECRET
 
 ## Logging
 
-One JSON object per line on stdout, with a `severity` field that Cloud Logging reads. Each request logs method, path (never the query string), status, duration, key id and target as `scheme://host` only. A redaction pass in the formatter also strips URL paths and queries, `access_key=` values, bearer tokens and `cal_` keys from every message and traceback. uvicorn's access log is off, and httpx logs are raised to WARNING.
+One JSON object per line on stdout, with a `severity` field that Cloud Logging reads. Each request logs method, path (never the query string), status, duration, key id and target as `scheme://host` only. It also names the software that sent it, never the `User-Agent` itself (`logs.client_software`): `agent` is the header's first product token, lower-cased, `[a-z0-9._-]` only, at most 32 characters (`mozilla`, `curl`, `python-httpx`; `null` if there is none), and `agent_kind` is `none` (no header), `bot` (one of `logs.BOT_MARKERS` anywhere in the header), `browser` (starts with `Mozilla/`) or `tool`. The line for an MCP `initialize` on `POST /mcp` adds `mcp_client` and `mcp_client_version`, the `clientInfo` name and version cleaned the same way (spaces become `-`; at most 40 and 20 characters; `null` when absent or not a string); no other line has those two fields. A redaction pass in the formatter also strips URL paths and queries, `access_key=` values, bearer tokens and `cal_` keys from every message and traceback. uvicorn's access log is off, and httpx logs are raised to WARNING.
 
 ## Deploy to Google Cloud Run (notes; not done)
 
