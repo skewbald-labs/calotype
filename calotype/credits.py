@@ -2,7 +2,10 @@
 
 ``POST /v1/credits`` with a key and ``{"pack": "starter"}`` sells a prepaid
 pack through Stripe's machine payments, over the Machine Payments Protocol
-(MPP; the wire format is in ``mpp.py``):
+(MPP; the wire format is in ``mpp.py``). Two MPP methods can pay: ``stripe``
+(a card, through a shared payment token; always offered) and ``tempo`` (USDC on
+the Tempo chain; offered with ``CALOTYPE_CREDITS_STABLECOIN=1``, see
+``tempo.py``). The card flow:
 
 1. Without a payment the endpoint answers ``402`` with a challenge for the
    pack's price: MPP method ``stripe``, intent ``charge``, the amount in cents
@@ -28,6 +31,20 @@ and each of these can therefore run any number of times:
 - the ``payment_intent.succeeded`` webhook, on first delivery or replayed. It
   also covers a server that was stopped between the charge and the credit.
 
+The Tempo flow differs after the challenge checks: the payment is a transfer
+on the chain, checked (and for a signed transaction, broadcast) by the
+official SDK in ``tempo.py``. Once the chain has it, the pack is credited under
+the transaction hash, in the same atomic step, and only then is the payment
+recorded in Stripe: one PaymentIntent with the ``crypto`` payment method in
+``transaction_verification`` mode, idempotency key ``calotype_tempo_<hash>``,
+as ``pympp``'s Stripe recorder does it. The transfer is final whatever Stripe
+answers, so a failed recording does not take the credit back; it is logged,
+tried again when the buyer resends the credential, and can be redone with
+``admin record-tempo``. Its ``payment_intent.succeeded`` webhook links the
+PaymentIntent to the purchase and credits nothing twice. A refund goes through
+that PaymentIntent and Stripe returns stablecoins to the sending wallet
+(https://docs.stripe.com/payments/deposit-mode-stablecoin-payments, "Refunds").
+
 The PaymentIntent call follows ``mppx`` 0.21.1, the SDK Stripe's guide tells
 sellers to run (https://docs.stripe.com/payments/machine/mpp): top-level
 ``shared_payment_granted_token``, ``confirm``, ``automatic_payment_methods``
@@ -39,8 +56,10 @@ endpoint answers 503, like the other billing endpoints without Stripe.
 
 ``CALOTYPE_CREDITS``             ``1`` turns the endpoint on (required)
 ``CALOTYPE_CREDITS_CARD``        ``1`` offers cards through shared payment tokens (required today)
-``CALOTYPE_CREDITS_STABLECOIN``  ``1`` asks for stablecoin payments. NOT IMPLEMENTED: it is
-                                 reported at startup and nothing is offered for it
+``CALOTYPE_CREDITS_STABLECOIN``  ``1`` offers USDC on Tempo too (MPP method ``tempo``). Off by default
+``STRIPE_TEMPO_DEPOSIT_ADDRESS`` the Stripe crypto deposit address on Tempo (required with the above;
+                                 ``admin tempo-deposit-address`` lists or creates it)
+``CALOTYPE_TEMPO_RPC_URL``       optional: a Tempo node of your own instead of the public one
 ``STRIPE_SECRET_KEY``            the same key ``billing.py`` uses (required)
 ``STRIPE_PROFILE_ID``            the Stripe profile id, ``profile_...`` (required)
 ``MPP_SECRET_KEY``               signs challenges. Optional: derived from the Stripe key if unset,
@@ -49,9 +68,9 @@ endpoint answers 503, like the other billing endpoints without Stripe.
 ``STRIPE_MPP_API_VERSION``       optional, default ``2026-07-29.preview``
 ``STRIPE_SPT_PAYMENT_METHOD_TYPES``  optional, default ``card,link``
 
-Not here: stablecoins (Tempo USDC). That path needs on-chain verification of
-the buyer's transfer, which the official SDKs do and which was not rebuilt by
-hand. See deploy/README.md, "Prepaid credit".
+Stablecoin payment needs ``CALOTYPE_CREDITS_CARD`` as well: cards stay the
+method every wallet that pays Stripe can use. See deploy/README.md, "Prepaid
+credit".
 """
 
 from __future__ import annotations
@@ -67,7 +86,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from . import __version__, mpp
+from . import __version__, mpp, tempo
 from .billing import (
     METADATA_KEY_ID,
     BillingProviderError,
@@ -96,6 +115,7 @@ MIN_CARD_CENTS = 50
 
 METADATA_PACK = "calotype_credit_pack"
 METADATA_SCREENSHOTS = "calotype_credit_screenshots"
+METADATA_TEMPO_TX = "calotype_tempo_tx"  # on a PaymentIntent that records a Tempo payment
 HANDLED_EVENTS = frozenset({"payment_intent.succeeded"})
 
 UNAVAILABLE_MESSAGE = (
@@ -123,17 +143,25 @@ class PaymentRefused(Exception):
 
 
 class PaymentUnconfirmed(Exception):
-    """Stripe did not say whether the payment went through. The same credential may be sent again."""
+    """Stripe, or the Tempo chain, did not say whether the payment went through.
+
+    The same credential may be sent again. ``method`` names who was asked.
+    """
+
+    def __init__(self, reason: str, method: str = METHOD):
+        super().__init__(reason)
+        self.method = method
 
 
 @dataclass(frozen=True)
 class Settlement:
     """A credential that has been paid for and credited (now, or by an earlier call)."""
 
-    reference: str  # the Stripe PaymentIntent id
+    reference: str  # the Stripe PaymentIntent id (card) or the transaction hash (tempo)
     added: bool  # False: this payment had already been credited
     screenshots: int
     balance: int
+    method: str = METHOD
 
 
 @dataclass(frozen=True)
@@ -145,8 +173,8 @@ class CreditsConfig:
     api_version: str = DEFAULT_API_VERSION
     payment_method_types: tuple[str, ...] = DEFAULT_PAYMENT_METHOD_TYPES
     expires_s: int = mpp.DEFAULT_EXPIRES_S
-    # Asked for but not built; named at startup so nobody thinks it is on.
-    unsupported: tuple[str, ...] = ()
+    # Set when stablecoin payment is on (CALOTYPE_CREDITS_STABLECOIN=1).
+    tempo: tempo.TempoConfig | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> tuple["CreditsConfig | None", list[str]]:
@@ -170,6 +198,11 @@ class CreditsConfig:
         types = tuple(t.strip() for t in get("STRIPE_SPT_PAYMENT_METHOD_TYPES").split(",") if t.strip())
         if any(not _PAYMENT_METHOD_TYPE.match(t) for t in types):
             missing.append("STRIPE_SPT_PAYMENT_METHOD_TYPES")
+        tempo_config = None
+        if on("CALOTYPE_CREDITS_STABLECOIN"):
+            # Asked for but incomplete: the endpoint stays off rather than quietly selling cards only.
+            tempo_config, tempo_missing = tempo.TempoConfig.from_env(env, get("STRIPE_SECRET_KEY"))
+            missing.extend(tempo_missing)
         if missing:
             return None, missing
         secret_key = get("STRIPE_SECRET_KEY")
@@ -181,7 +214,7 @@ class CreditsConfig:
                 realm=get("MPP_REALM"),
                 api_version=get("STRIPE_MPP_API_VERSION") or DEFAULT_API_VERSION,
                 payment_method_types=types or DEFAULT_PAYMENT_METHOD_TYPES,
-                unsupported=("CALOTYPE_CREDITS_STABLECOIN",) if on("CALOTYPE_CREDITS_STABLECOIN") else (),
+                tempo=tempo_config,
             ),
             [],
         )
@@ -202,7 +235,7 @@ def derive_challenge_secret(stripe_secret_key: str) -> str:
 class CreditsProvider(Protocol):
     configured: bool
 
-    def challenge(self, key: "ApiKey", pack: "CreditPack", *, realm: str, header: str) -> mpp.Challenge: ...
+    def challenges(self, key: "ApiKey", pack: "CreditPack", *, realm: str, header: str) -> list[mpp.Challenge]: ...
 
     def settle(
         self, key: "ApiKey", pack: "CreditPack", authorization: str, store: "Storage", *, realm: str, header: str
@@ -218,9 +251,9 @@ class NoCredits:
 
     def __init__(self, missing: list[str] | None = None):
         self.missing = list(missing or [])
-        self.unsupported: tuple[str, ...] = ()
+        self.methods: tuple[str, ...] = ()
 
-    def challenge(self, key, pack, *, realm, header) -> mpp.Challenge:
+    def challenges(self, key, pack, *, realm, header) -> list[mpp.Challenge]:
         raise BillingUnavailable(UNAVAILABLE_MESSAGE)
 
     def settle(self, key, pack, authorization, store, *, realm, header) -> Settlement:
@@ -234,22 +267,25 @@ class StripeCredits:
     """Sells prepaid packs for a card payment made with a shared payment token.
 
     ``client`` is a ``stripe.StripeClient``; tests pass a stand-in so that no
-    call reaches Stripe.
+    call reaches Stripe. ``tempo_transport`` replaces the Tempo node the same
+    way (an ``httpx`` transport).
     """
 
     configured = True
 
-    def __init__(self, config: CreditsConfig, *, client: Any = None):
+    def __init__(self, config: CreditsConfig, *, client: Any = None, tempo_transport: Any = None):
         self.config = config
         if client is None:
             import stripe
 
             client = stripe.StripeClient(config.secret_key, max_network_retries=2)
         self._client = client
+        self._tempo = tempo.TempoMethod(config.tempo, transport=tempo_transport) if config.tempo else None
 
     @property
-    def unsupported(self) -> tuple[str, ...]:
-        return self.config.unsupported
+    def methods(self) -> tuple[str, ...]:
+        """The MPP methods a buyer is offered, in the order of the 402's challenges."""
+        return (METHOD, tempo.METHOD) if self._tempo else (METHOD,)
 
     # --- the challenge ---------------------------------------------------------------------
 
@@ -268,21 +304,35 @@ class StripeCredits:
             },
         }
 
-    def challenge(self, key: "ApiKey", pack: "CreditPack", *, realm: str, header: str) -> mpp.Challenge:
+    def request_for(self, method: str, pack: "CreditPack") -> dict[str, Any]:
+        """The ``request`` this server asks for ``pack`` in ``method``. Raises ``KeyError`` for another method."""
+        if method == METHOD:
+            return self.charge_request(pack)
+        if method == tempo.METHOD and self._tempo is not None:
+            return self._tempo.request(pack.price_usd_cents)
+        raise KeyError(method)
+
+    def challenge(
+        self, key: "ApiKey", pack: "CreditPack", *, realm: str, header: str, method: str = METHOD
+    ) -> mpp.Challenge:
         """A new challenge for ``pack``, bound to ``key``. ``header`` says where the credential must come back."""
         if pack.price_usd_cents < MIN_CARD_CENTS:
             raise ValueError("Stripe's minimum for a card payment through a shared payment token is $0.50")
         return mpp.issue_challenge(
             self.config.challenge_secret,
             realm=realm,
-            method=METHOD,
+            method=method,
             intent=INTENT,
-            request=self.charge_request(pack),
+            request=self.request_for(method, pack),
             opaque={"key": str(key.id), "pack": pack.name},
             description=describe(pack),
             header=header,
             expires=mpp.expires_at(seconds=self.config.expires_s),
         )
+
+    def challenges(self, key: "ApiKey", pack: "CreditPack", *, realm: str, header: str) -> list[mpp.Challenge]:
+        """One challenge per method offered, card first. The buyer answers one of them."""
+        return [self.challenge(key, pack, realm=realm, header=header, method=m) for m in self.methods]
 
     # --- the payment -----------------------------------------------------------------------
 
@@ -309,7 +359,7 @@ class StripeCredits:
             raise PaymentRefused(
                 "invalid-challenge", "The credential's challenge was not issued by this server, or was changed."
             )
-        if (credential.realm, credential.method, credential.intent) != (realm, METHOD, INTENT):
+        if (credential.realm, credential.intent) != (realm, INTENT) or credential.method not in self.methods:
             raise PaymentRefused("invalid-challenge", "The credential's challenge is for another resource.")
         if credential.header.lower() != header.lower():
             where = credential.header or "Authorization"
@@ -331,14 +381,20 @@ class StripeCredits:
         #    paid credential again after five minutes is never answered "pay again".
         prior = store.find_credit_purchase_by_challenge(credential.id)
         if prior is not None and prior.key_id == key.id:
-            return Settlement(prior.id, False, prior.screenshots, store.get_credit_balance(key.id))
+            if prior.method == tempo.METHOD and not prior.payment_intent:
+                # Credited, but Stripe has no record of it yet: try again now.
+                self._record_tempo(prior.key_id, pack, credential.id, prior.id, store)
+            return Settlement(prior.id, False, prior.screenshots, store.get_credit_balance(key.id), prior.method)
 
-        # 3. Still valid, and still what this pack costs.
+        # 3. Still valid, and still what this pack costs in this method.
         expires = mpp.parse_time(credential.expires)
         if expires is None or expires <= datetime.now(UTC):
             raise PaymentRefused("payment-expired", "The challenge has expired. Pay the new one.")
-        if request != self.charge_request(pack):
+        if request != self.request_for(credential.method, pack):
             raise PaymentRefused("invalid-challenge", "The pack's terms have changed. Pay the new challenge.")
+
+        if credential.method == tempo.METHOD:
+            return self._settle_tempo(key, pack, credential, request, store)
 
         # 4. Only now is the token looked at.
         spt = credential.payload.get("spt")
@@ -367,7 +423,151 @@ class StripeCredits:
             added=added,
             balance=balance,
         )
-        return Settlement(intent_id, added, pack.screenshots, balance)
+        return Settlement(intent_id, added, pack.screenshots, balance, METHOD)
+
+    def _settle_tempo(
+        self, key: "ApiKey", pack: "CreditPack", credential: mpp.Credential, request: dict[str, Any], store: "Storage"
+    ) -> Settlement:
+        """The chain's part, then the credit, then Stripe's record. See the module docstring."""
+        assert self._tempo is not None
+        try:
+            payment = self._tempo.settle(credential, request, store)
+        except tempo.Refused as e:
+            raise PaymentRefused(e.problem, e.detail) from None
+        except tempo.Unconfirmed as e:
+            raise PaymentUnconfirmed(str(e), method=tempo.METHOD) from None
+
+        tx_hash = payment.transaction_hash
+        # The transfer is on the chain now and cannot be undone: credit it first, once per transaction.
+        added, balance = store.add_credit_purchase(
+            tx_hash,
+            key.id,
+            pack=pack.name,
+            screenshots=pack.screenshots,
+            amount_cents=pack.price_usd_cents,
+            currency=CURRENCY,
+            challenge_id=credential.id,
+            method=tempo.METHOD,
+        )
+        if not added:
+            earlier = store.get_credit_purchase(tx_hash)
+            if earlier is not None and earlier.key_id != key.id:
+                # The SDK binds a transfer to one challenge, so this should never happen. Never credit twice.
+                log_event(log, "tempo transaction already paid another key", level=logging.ERROR, key_id=key.id)
+                raise PaymentRefused("verification-failed", "This transaction has already paid for another purchase.")
+        log_event(
+            log,
+            "credit purchase",
+            key_id=key.id,
+            pack=pack.name,
+            method=tempo.METHOD,
+            transaction=tx_hash,
+            added=added,
+            balance=balance,
+        )
+        purchase = store.get_credit_purchase(tx_hash)
+        if purchase is None or not purchase.payment_intent:
+            self._record_tempo(key.id, pack, credential.id, tx_hash, store)
+        return Settlement(tx_hash, added, pack.screenshots, balance, tempo.METHOD)
+
+    def _record_tempo(
+        self, key_id: int, pack: "CreditPack", challenge_id: str, tx_hash: str, store: "Storage"
+    ) -> str | None:
+        """Record a Tempo payment in Stripe as a crypto PaymentIntent and link it. Returns its id, or None.
+
+        Never raises: the payment is credited already, and a failure here is a
+        bookkeeping fault for the operator (logged as an error), not the buyer's.
+        The call is ``pympp``'s (``mpp.methods.stripe.crypto_payment_recorder``):
+        ``payment_method_data.type`` and ``payment_method_types`` ``crypto``,
+        ``payment_method_options.crypto.mode`` ``transaction_verification`` with
+        the network and transaction hash, idempotent on the hash.
+        """
+        import stripe
+
+        params: dict[str, Any] = {
+            "amount": pack.price_usd_cents,
+            "currency": CURRENCY,
+            "confirm": True,
+            "payment_method_data": {"type": "crypto"},
+            "payment_method_types": ["crypto"],
+            "payment_method_options": {
+                "crypto": {
+                    "mode": "transaction_verification",
+                    "transaction_verification_options": {"network": tempo.NETWORK, "transaction_hash": tx_hash},
+                }
+            },
+            "description": describe(pack),
+            "metadata": {
+                "machine_payment": "true",
+                "mpp_sdk": f"calotype/{__version__}",
+                "mpp_intent": INTENT,
+                "mpp_challenge_id": challenge_id,
+                METADATA_KEY_ID: str(key_id),
+                METADATA_PACK: pack.name,
+                METADATA_SCREENSHOTS: str(pack.screenshots),
+                METADATA_TEMPO_TX: tx_hash,
+            },
+        }
+        options = {"idempotency_key": f"calotype_tempo_{tx_hash}", "stripe_version": self.config.api_version}
+        try:
+            intent = self._client.v1.payment_intents.create(params=params, options=options)
+        except stripe.StripeError as e:
+            log_event(
+                log,
+                "tempo payment not recorded in stripe",
+                level=logging.ERROR,
+                key_id=key_id,
+                transaction=tx_hash,
+                error=type(e).__name__,
+                code=getattr(e, "code", None),
+                http_status=getattr(e, "http_status", None),
+            )
+            return None
+        intent_id, status = _field(intent, "id"), _field(intent, "status")
+        if not isinstance(intent_id, str) or not _PAYMENT_INTENT.match(intent_id):
+            log_event(log, "tempo payment not recorded in stripe", level=logging.ERROR, transaction=tx_hash)
+            return None
+        bad = status in ("canceled", "requires_payment_method")
+        log_event(
+            log,
+            "tempo payment recorded in stripe",
+            level=logging.ERROR if bad else logging.INFO,
+            key_id=key_id,
+            transaction=tx_hash,
+            payment_intent=intent_id,
+            status=status,
+        )
+        store.set_credit_payment_intent(tx_hash, intent_id)
+        return intent_id
+
+    def record_tempo_purchase(self, purchase: "CreditPurchase", store: "Storage") -> str | None:
+        """``admin record-tempo``: record a credited Tempo purchase in Stripe now. Returns the PaymentIntent id."""
+        from .config import CreditPack
+
+        if purchase.method != tempo.METHOD or not tempo.TX_HASH.match(purchase.id):
+            raise ValueError("not a Tempo purchase")
+        if purchase.payment_intent:
+            return purchase.payment_intent
+        pack = CreditPack(purchase.pack, purchase.screenshots, purchase.amount_cents, purchase.pack)
+        return self._record_tempo(purchase.key_id, pack, purchase.challenge_id, purchase.id, store)
+
+    def tempo_deposit_addresses(self, *, create: bool = False) -> list[dict[str, Any]]:
+        """``admin tempo-deposit-address``: this Stripe account's Tempo deposit addresses, after making one if asked.
+
+        ``GET``/``POST /v1/crypto/deposit_addresses`` with ``network=tempo``
+        (https://docs.stripe.com/payments/machine/mpp). Raises ``BillingProviderError``.
+        """
+        import stripe
+
+        path, version = "/v1/crypto/deposit_addresses", self.config.api_version
+        try:
+            if create:
+                made = self._client.raw_request("post", path, network=tempo.NETWORK, stripe_version=version)
+                return [_plain(self._client.deserialize(made, api_mode="V1"))]
+            listed = self._client.raw_request("get", path, network=tempo.NETWORK, stripe_version=version)
+            return list(_plain(self._client.deserialize(listed, api_mode="V1")).get("data") or [])
+        except stripe.StripeError as e:
+            raise BillingProviderError(f"{type(e).__name__} {getattr(e, 'code', None) or ''}".strip()) from None
 
     def _charge(self, key: "ApiKey", pack: "CreditPack", challenge_id: str, spt: str) -> str:
         """Create and confirm the PaymentIntent. Returns its id once it has succeeded."""
@@ -501,6 +701,13 @@ class StripeCredits:
             log_event(log, "stripe call failed", level=logging.ERROR, error=type(e).__name__)
             raise BillingProviderError(type(e).__name__) from None
         metadata = intent.get("metadata") or {}
+        purchase_id, method, recorded_by = intent_id, METHOD, None
+        if METADATA_TEMPO_TX in metadata:
+            # A Tempo payment this server credited (or was about to) under its transaction hash.
+            tx_hash = metadata.get(METADATA_TEMPO_TX)
+            if not isinstance(tx_hash, str) or not tempo.TX_HASH.match(tx_hash):
+                return EventResult("ignored")
+            purchase_id, method, recorded_by = tx_hash.lower(), tempo.METHOD, intent_id
         pack_name = metadata.get(METADATA_PACK)
         screenshots = _int_or_none(metadata.get(METADATA_SCREENSHOTS))
         key_id = _metadata_key_id(intent)
@@ -518,15 +725,18 @@ class StripeCredits:
             log_event(log, "credit payment for an unknown key", level=logging.WARNING, payment_intent=intent_id)
             return EventResult("unknown_key")
         added, _balance = store.add_credit_purchase(
-            intent_id,
+            purchase_id,
             key_id,
             pack=pack_name,
             screenshots=screenshots,
             amount_cents=amount,
             currency=str(intent.get("currency") or CURRENCY),
             challenge_id=str(metadata.get("mpp_challenge_id") or ""),
-            method=METHOD,
+            method=method,
+            payment_intent=recorded_by,
         )
+        if recorded_by and not added:
+            store.set_credit_payment_intent(purchase_id, recorded_by)
         return EventResult("credited" if added else "already_credited", key_id)
 
     # --- refunds (admin CLI) ---------------------------------------------------------------
@@ -536,18 +746,21 @@ class StripeCredits:
 
         The idempotency key is the purchase's own, so running it twice makes
         one refund. Raises ``BillingProviderError`` if Stripe refuses or
-        cannot be reached.
+        cannot be reached, and ``ValueError`` for a Tempo payment that Stripe
+        has no PaymentIntent for. A Tempo payment's refund goes back in
+        stablecoins to the wallet that sent it (Stripe's rule for crypto).
         """
         import stripe
 
-        if not _PAYMENT_INTENT.match(purchase.id):
-            raise ValueError("not a Stripe PaymentIntent id")
+        intent_id = purchase.stripe_payment_intent
+        if intent_id is None or not _PAYMENT_INTENT.match(intent_id):
+            raise ValueError("no Stripe PaymentIntent records this payment")
         if not 0 < amount_cents <= purchase.amount_cents:
             raise ValueError("the refund must be more than nothing and at most what was paid")
         try:
             refund = self._client.v1.refunds.create(
                 params={
-                    "payment_intent": purchase.id,
+                    "payment_intent": intent_id,
                     "amount": amount_cents,
                     "reason": "requested_by_customer",
                     "metadata": {METADATA_KEY_ID: str(purchase.key_id), METADATA_PACK: purchase.pack},
@@ -567,7 +780,7 @@ class StripeCredits:
         refund_id = _field(refund, "id")
         if not isinstance(refund_id, str) or not refund_id:
             raise BillingProviderError("Stripe returned no Refund id")
-        log_event(log, "credit purchase refunded", payment_intent=purchase.id, refund=refund_id, amount=amount_cents)
+        log_event(log, "credit purchase refunded", payment_intent=intent_id, refund=refund_id, amount=amount_cents)
         return refund_id
 
 

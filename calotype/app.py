@@ -38,6 +38,9 @@ from .credits import HANDLED_EVENTS as CREDIT_EVENTS
 from .credits import MIN_CARD_CENTS
 from .credits import UNAVAILABLE_MESSAGE as CREDITS_UNAVAILABLE_MESSAGE
 from .credits import CreditsProvider, PaymentRefused, PaymentUnconfirmed, credits_from_env
+
+# How the 402's message names each MPP method.
+METHOD_NAMES = {"stripe": "a card through a Stripe shared payment token", "tempo": "USDC on Tempo"}
 from .keypages import BrowserPages, add_key_routes
 from .logs import client_software, log_event, setup_logging
 from .oauth import OAuthServer, add_oauth_routes, oauth_enabled
@@ -196,12 +199,14 @@ def create_app(
         if not credits.configured and "CALOTYPE_CREDITS" not in credits_missing:
             # Switched on but incomplete. Left unsaid when it was never switched on.
             log_event(log, "prepaid credit is off", level=logging.WARNING, missing=credits_missing)
-        if getattr(credits, "unsupported", ()):
+        if credits.configured:
+            # Which MPP methods the 402 offers: "stripe" (cards), and "tempo" (USDC) when switched on.
+            tempo_config = getattr(getattr(credits, "config", None), "tempo", None)
             log_event(
                 log,
-                "asked for a payment method that is not built; it is not offered",
-                level=logging.WARNING,
-                settings=list(credits.unsupported),
+                "prepaid credit is on",
+                methods=list(getattr(credits, "methods", ())),
+                tempo_chain_id=tempo_config.chain_id if tempo_config else None,
             )
         if not notices_on:
             log_event(log, "quota emails are off", needs="CALOTYPE_EMAIL_TOKEN_SECRET (32+ characters)")
@@ -814,13 +819,18 @@ def create_app(
     def payment_challenge(
         key: ApiKey, pack: CreditPack, realm: str, header: str, problem: str, detail: str
     ) -> JSONResponse:
-        """402 with a new challenge: the first answer, and the answer to a credential that was refused."""
-        challenge = credits.challenge(key, pack, realm=realm, header=header)
+        """402 with new challenges: the first answer, and the answer to a credential that was refused.
+
+        One ``WWW-Authenticate`` header per payment method offered (card first), as the
+        protocol allows (https://paymentauth.org/draft-httpauth-payment-01, appendix B.4).
+        """
+        challenges = credits.challenges(key, pack, realm=realm, header=header)
         code = problem.replace("-", "_")
         if problem == "payment-required":
+            ways = " or ".join(f"'{c.method}' ({METHOD_NAMES.get(c.method, c.method)})" for c in challenges)
             message = (
-                f"Pay ${pack.price_usd_cents / 100:g} for {pack.screenshots:,} prepaid screenshots: answer the "
-                f"Payment challenge in WWW-Authenticate (MPP, method 'stripe'), then send this request again "
+                f"Pay ${pack.price_usd_cents / 100:g} for {pack.screenshots:,} prepaid screenshots: answer one "
+                f"Payment challenge in WWW-Authenticate (MPP, method {ways}), then send this request again "
                 f"with the credential in {header or 'Authorization'}."
             )
         else:
@@ -828,17 +838,22 @@ def create_app(
         body = mpp.problem(
             problem,
             detail,
-            challengeId=challenge.id,
+            challengeId=challenges[0].id,
             # Calotype's own error shape, beside the protocol's problem details.
-            error={"code": code, "message": message, "pack": pack_json(pack)},
+            error={
+                "code": code,
+                "message": message,
+                "pack": pack_json(pack),
+                "methods": [c.method for c in challenges],
+            },
         )
         log_event(log, "credit challenge", key_id=key.id, pack=pack.name, problem=problem)
-        return JSONResponse(
-            body,
-            status_code=402,
-            media_type=mpp.PROBLEM_CONTENT_TYPE,
-            headers={"WWW-Authenticate": challenge.www_authenticate(), "Cache-Control": "no-store"},
+        response = JSONResponse(
+            body, status_code=402, media_type=mpp.PROBLEM_CONTENT_TYPE, headers={"Cache-Control": "no-store"}
         )
+        for challenge in challenges:
+            response.headers.append("WWW-Authenticate", challenge.www_authenticate())
+        return response
 
     # In the API schema only where it is on sale; where it is off it answers 503, like billing.
     @app.post("/v1/credits", include_in_schema=credits.configured)
@@ -872,7 +887,7 @@ def create_app(
         if mpp.payment_credential(credential) is None:
             return payment_challenge(key, pack, realm, header, "payment-required", "Payment is required for this pack.")
         # Asking for a challenge is free and unlimited. Sending credentials is not: each one that
-        # passes the checks makes Calotype call Stripe, so one key gets only so many an hour.
+        # passes the checks makes Calotype call Stripe or the Tempo network, so one key gets only so many an hour.
         ok, retry = app.state.credit_limiter.check(str(key.id))
         if not ok:
             raise ApiError(
@@ -888,11 +903,12 @@ def create_app(
             )
         except PaymentRefused as e:
             return payment_challenge(key, pack, realm, header, e.problem, e.detail)
-        except PaymentUnconfirmed:
+        except PaymentUnconfirmed as e:
+            who = "The Tempo network" if e.method == "tempo" else "Stripe"
             raise ApiError(
                 502,
                 "payment_unconfirmed",
-                "Stripe has not confirmed this payment yet. Send the same request with the same credential "
+                f"{who} has not confirmed this payment yet. Send the same request with the same credential "
                 "again: it cannot charge twice. GET /v1/usage shows the credit once it is added.",
             )
         except BillingUnavailable:
@@ -906,9 +922,13 @@ def create_app(
                 "credits": paid.balance,
                 # True when this payment had been credited before: nothing was charged or added again.
                 "already_credited": not paid.added,
-                "payment": {"method": "stripe", "reference": paid.reference, "amount_usd": pack.price_usd_cents / 100},
+                "payment": {
+                    "method": paid.method,
+                    "reference": paid.reference,
+                    "amount_usd": pack.price_usd_cents / 100,
+                },
             },
-            headers={"Payment-Receipt": mpp.receipt("stripe", paid.reference), "Cache-Control": "no-store"},
+            headers={"Payment-Receipt": mpp.receipt(paid.method, paid.reference), "Cache-Control": "no-store"},
         )
 
     @app.get("/v1/plans")

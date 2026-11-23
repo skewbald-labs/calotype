@@ -71,6 +71,7 @@ def no_stripe_env(monkeypatch):
     for name in (
         "CALOTYPE_CREDITS", "CALOTYPE_CREDITS_CARD", "CALOTYPE_CREDITS_STABLECOIN", "STRIPE_PROFILE_ID",
         "MPP_SECRET_KEY", "MPP_REALM", "STRIPE_MPP_API_VERSION", "STRIPE_SPT_PAYMENT_METHOD_TYPES",
+        "STRIPE_TEMPO_DEPOSIT_ADDRESS", "CALOTYPE_TEMPO_RPC_URL",
     ):
         monkeypatch.delenv(name, raising=False)
 

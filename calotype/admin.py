@@ -10,7 +10,9 @@
     python -m calotype.admin usage 3
     python -m calotype.admin contacts
     python -m calotype.admin credits 3
-    python -m calotype.admin refund-credit pi_... [--yes] [--prorated] [--no-stripe]
+    python -m calotype.admin refund-credit pi_... [--yes] [--prorated] [--no-stripe]   (or 0x...: a Tempo payment)
+    python -m calotype.admin record-tempo 0x...       (record a credited Tempo payment in Stripe)
+    python -m calotype.admin tempo-deposit-address [--create]
     python -m calotype.admin remove-email 3            (or an address: every key that holds it)
     python -m calotype.admin tries [--days 7]          (the home page's free tries, per UTC day)
     python -m calotype.admin funnel [--days 7]         (steps toward a key, per UTC day; see funnel.py)
@@ -58,6 +60,21 @@ was unused. Without ``--yes`` it only prints what it would do. It needs
 ``STRIPE_SECRET_KEY``; with ``--no-stripe`` it only takes the credit back, and
 the money has to be refunded by hand in the Stripe dashboard. Running it again
 after a failure finishes the job and never refunds twice.
+
+A purchase paid in USDC on Tempo is named by its transaction hash (``0x...``).
+It is refunded through the PaymentIntent that records it in Stripe, and Stripe
+sends stablecoins back to the wallet the payment came from
+(https://docs.stripe.com/payments/stablecoin-payments, "Refunds"). If the
+buyer paid from an exchange or a shared wallet, they may not be able to get
+it back there; check before refunding. If Stripe has no PaymentIntent for the
+payment (its recording failed), ``refund-credit`` refuses and changes nothing:
+run ``record-tempo 0x...`` first. Calotype holds no wallet of its own, so it
+cannot send the coins back any other way.
+
+``tempo-deposit-address`` lists the Stripe account's crypto deposit addresses
+on Tempo, the ``STRIPE_TEMPO_DEPOSIT_ADDRESS`` that stablecoin payment needs;
+``--create`` makes one first. It needs ``STRIPE_SECRET_KEY`` only. An address
+is public: buyers see it in every challenge.
 """
 
 from __future__ import annotations
@@ -153,21 +170,40 @@ def describe_purchase(p: CreditPurchase) -> str:
     if p.refunded_at:
         how = f"Stripe refund {p.refund_id}" if p.refund_id else "no Stripe refund recorded"
         state = f"refunded {p.refunded_at} ({p.credits_removed} credits taken back; {how})"
+    via = ""
+    if p.method == "tempo":
+        via = f" via=tempo payment_intent={p.payment_intent or 'NONE (run record-tempo)'}"
     return (
         f"{p.id}: key={p.key_id} pack={p.pack} screenshots={p.screenshots} "
-        f"paid=${p.amount_cents / 100:.2f} {p.currency} at={p.created_at} {state}"
+        f"paid=${p.amount_cents / 100:.2f} {p.currency}{via} at={p.created_at} {state}"
     )
 
 
 def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool, no_stripe: bool) -> int:
     """Undo one prepaid purchase: take back its unused credit, then refund it through Stripe."""
-    purchase = store.get_credit_purchase(purchase_id)
+    purchase = store.get_credit_purchase(purchase_id.lower() if purchase_id.startswith("0x") else purchase_id)
     if purchase is None:
-        print("no credit purchase with that PaymentIntent id", file=sys.stderr)
+        print("no credit purchase with that PaymentIntent id or transaction hash", file=sys.stderr)
         return 1
     if purchase.refund_id:
         print(f"already refunded: {describe_purchase(purchase)}", file=sys.stderr)
         return 0
+    purchase_id = purchase.id
+    if not no_stripe and purchase.stripe_payment_intent is None:
+        # A Tempo payment that Stripe has no record of. Stripe cannot refund it, and Calotype holds no wallet.
+        print(
+            f"Stripe has no PaymentIntent for {purchase.id}, so it cannot refund it. Nothing was changed. "
+            f"Run 'record-tempo {purchase.id}' first, then this again. (--no-stripe takes the credit back only; "
+            "the coins could then be returned only from the deposit address, which Stripe holds.)",
+            file=sys.stderr,
+        )
+        return 1
+    if purchase.method == "tempo":
+        print(
+            "This was paid in USDC on Tempo: Stripe refunds it in stablecoins to the wallet that sent it. If the "
+            "buyer paid from an exchange or a shared wallet, they may not get it back there.",
+            file=sys.stderr,
+        )
 
     def refund_cents(removed: int) -> int:
         return purchase.amount_cents * removed // purchase.screenshots if prorated else purchase.amount_cents
@@ -209,7 +245,7 @@ def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool
     amount = refund_cents(purchase.credits_removed)
     if provider is None:
         print(
-            f"WARNING: --no-stripe: PaymentIntent {purchase.id} was NOT refunded. "
+            f"WARNING: --no-stripe: payment {purchase.id} was NOT refunded. "
             f"Refund ${amount / 100:.2f} by hand in the Stripe dashboard.",
             file=sys.stderr,
         )
@@ -221,13 +257,58 @@ def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool
         refund_id = provider.refund(purchase, amount)
     except BillingProviderError as e:
         print(
-            f"Stripe could not refund PaymentIntent {purchase.id} ({e}). The credit was taken back; the money was "
+            f"Stripe could not refund payment {purchase.id} ({e}). The credit was taken back; the money was "
             "not returned. Run the same command again, or refund it by hand in the Stripe dashboard.",
             file=sys.stderr,
         )
         return 1
     store.set_credit_refund_id(purchase.id, refund_id)
     print(f"refunded ${amount / 100:.2f} through Stripe: {refund_id}", file=sys.stderr)
+    return 0
+
+
+def record_tempo(store: Storage, tx_hash: str) -> int:
+    """Record a credited Tempo payment in Stripe, when the app could not (see credits.py)."""
+    purchase = store.get_credit_purchase(tx_hash.lower())
+    if purchase is None or purchase.method != "tempo":
+        print("no Tempo purchase with that transaction hash", file=sys.stderr)
+        return 1
+    if purchase.payment_intent:
+        print(f"already recorded: {describe_purchase(purchase)}", file=sys.stderr)
+        return 0
+    provider = open_credits()
+    if provider is None:
+        print("STRIPE_SECRET_KEY is not set. Nothing was changed.", file=sys.stderr)
+        return 1
+    intent_id = provider.record_tempo_purchase(purchase, store)
+    if intent_id is None:
+        print("Stripe did not record it (the log says why). Nothing was changed; run it again.", file=sys.stderr)
+        return 1
+    print(f"recorded in Stripe as PaymentIntent {intent_id}", file=sys.stderr)
+    return 0
+
+
+def tempo_deposit_address(create: bool) -> int:
+    """List (or make, then list) the Stripe account's Tempo deposit addresses. Needs only STRIPE_SECRET_KEY."""
+    provider = open_credits()
+    if provider is None:
+        print("STRIPE_SECRET_KEY is not set.", file=sys.stderr)
+        return 1
+    try:
+        found = provider.tempo_deposit_addresses(create=create)
+    except BillingProviderError as e:
+        print(f"Stripe refused ({e}). Stablecoin payments may not be enabled on this account yet.", file=sys.stderr)
+        return 1
+    if not found:
+        print("no Tempo deposit address yet; --create makes one", file=sys.stderr)
+        return 0
+    print("id\taddress\tlivemode\ttokens")
+    for a in found:
+        tokens = ",".join(
+            f"{t.get('token_currency')}:{t.get('token_contract_address')}" for t in a.get("supported_tokens") or []
+        )
+        print(f"{a.get('id')}\t{a.get('address')}\t{a.get('livemode')}\t{tokens}")
+    print("Set the address as STRIPE_TEMPO_DEPOSIT_ADDRESS (it is not a secret).", file=sys.stderr)
     return 0
 
 
@@ -295,12 +376,18 @@ def main(argv: list[str] | None = None) -> int:
         "refund-credit",
         help="refund a prepaid purchase and take back its unused credit (dry run without --yes)",
     )
-    rc.add_argument("purchase_id", help="the purchase's Stripe PaymentIntent id, pi_...")
+    rc.add_argument("purchase_id", help="the purchase's Stripe PaymentIntent id, pi_..., or Tempo transaction hash, 0x...")
     rc.add_argument("--yes", action="store_true", help="really refund; without it, only show what would happen")
     rc.add_argument("--prorated", action="store_true", help="refund only the unused share of the price, not all of it")
     rc.add_argument(
         "--no-stripe", action="store_true", help="do not touch Stripe; the money must then be refunded by hand"
     )
+
+    rt = sub.add_parser("record-tempo", help="record a credited Tempo payment in Stripe, when the app could not")
+    rt.add_argument("transaction_hash", help="the purchase's Tempo transaction hash, 0x...")
+
+    td = sub.add_parser("tempo-deposit-address", help="list the Stripe account's Tempo deposit addresses")
+    td.add_argument("--create", action="store_true", help="make a new one first")
 
     e = sub.add_parser("remove-email", help="remove the quota-notice address from a key id, or from every key with an address")
     e.add_argument("target", help="a key id, or an email address")
@@ -312,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     fu.add_argument("--days", type=_positive_int, default=7, help="how many UTC days to show, today included (default 7)")
 
     args = parser.parse_args(argv)
+    if args.cmd == "tempo-deposit-address":
+        return tempo_deposit_address(args.create)
     settings = Settings.from_env()
     store = open_configured_storage(settings)
 
@@ -483,6 +572,9 @@ def main(argv: list[str] | None = None) -> int:
         return refund_credit(
             store, args.purchase_id.strip(), yes=args.yes, prorated=args.prorated, no_stripe=args.no_stripe
         )
+
+    if args.cmd == "record-tempo":
+        return record_tempo(store, args.transaction_hash.strip())
 
     return 2
 

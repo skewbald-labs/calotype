@@ -241,22 +241,27 @@ def test_a_profile_id_must_look_like_one():
 
 
 def test_stablecoins_alone_do_not_switch_it_on():
-    """The stablecoin method is not built: asking for it alone leaves the endpoint off."""
-    env = {**CREDITS_ENV, "CALOTYPE_CREDITS_STABLECOIN": "1"}
+    """Cards stay required: asking for stablecoins alone leaves the endpoint off."""
+    env = {**CREDITS_ENV, "CALOTYPE_CREDITS_STABLECOIN": "1", "STRIPE_TEMPO_DEPOSIT_ADDRESS": "0x" + "5f" * 20}
     del env["CALOTYPE_CREDITS_CARD"]
     config, names = CreditsConfig.from_env(env)
-    assert config is None and names == ["CALOTYPE_CREDITS_CARD"]
+    assert config is None and names[0] == "CALOTYPE_CREDITS_CARD"
 
 
-def test_stablecoins_with_cards_are_named_as_not_built(settings, store, fake_renderer, capsys):
-    config, _ = CreditsConfig.from_env({**CREDITS_ENV, "CALOTYPE_CREDITS_STABLECOIN": "1"})
-    assert config.unsupported == ("CALOTYPE_CREDITS_STABLECOIN",)
-    provider = StripeCredits(config, client=FakePayments().client)
+def test_stablecoins_without_a_deposit_address_leave_the_endpoint_off():
+    """Asked for but incomplete: off and named, rather than quietly selling cards only."""
+    config, names = CreditsConfig.from_env({**CREDITS_ENV, "CALOTYPE_CREDITS_STABLECOIN": "1"})
+    assert config is None and "STRIPE_TEMPO_DEPOSIT_ADDRESS" in names
+    assert isinstance(credits_from_env({**CREDITS_ENV, "CALOTYPE_CREDITS_STABLECOIN": "1"}), NoCredits)
+
+
+def test_without_the_stablecoin_flag_only_cards_are_offered(cclient, store, credits_config):
     raw, _ = store.create_key("free")
-    with make_client(settings, store, fake_renderer, provider) as c:
-        methods = [challenge_params(ask(c, raw))["method"]]
-    assert methods == ["stripe"]  # cards only; no stablecoin challenge is offered
-    assert "not built" in capsys.readouterr().out
+    response = ask(cclient, raw)
+    assert credits_config.tempo is None
+    assert [challenge_params(response)["method"]] == ["stripe"]
+    assert len(response.headers.get_list("www-authenticate")) == 1
+    assert response.json()["error"]["methods"] == ["stripe"]
 
 
 def test_config_never_shows_secrets(credits_config):
