@@ -21,7 +21,7 @@ The server, streamable HTTP, with your key in `Authorization: Bearer <key>`:
 https://calotype.dev/mcp?ref=gh-readme
 ```
 
-A free key, 100 screenshots a month, with no account or email: `curl -X POST https://calotype.dev/v1/keys` (the answer's `key` starts `cal_` and is shown once).
+A free key, 100 screenshots a month, with no account or email: `curl -X POST https://calotype.dev/v1/keys` (the answer's `key` starts `cal_` and is shown once). Without a terminal: the "Get a free key" button at [calotype.dev/keys](https://calotype.dev/keys?ref=gh-readme).
 
 ## What comes back
 
@@ -116,7 +116,7 @@ n8n's MCP Client Tool works with the streamable HTTP transport and a Bearer Auth
 
 ## Other ways in
 
-- **HTTP:** `GET https://calotype.dev/v1/screenshot?url=https://example.com` with the same header, as above. Reference: [calotype.dev/docs](https://calotype.dev/docs).
+- **HTTP:** `GET https://calotype.dev/v1/screenshot?url=https://example.com` with the same header, as above. Reference: [calotype.dev/docs](https://calotype.dev/docs). Opened in a browser with no key, that link, `/mcp` and `/v1/keys` show a short help page with a key button; programs get the JSON error.
 - **Paid plans:** [calotype.dev/pricing](https://calotype.dev/pricing).
 - Coming from another screenshot API, or deciding against Playwright: [calotype.dev/switch](https://calotype.dev/switch).
 - Regenerate the one-click links above with `python -m calotype.install_links`.
