@@ -1,17 +1,35 @@
 # Calotype runtime dependencies, pinned (pip freeze, 2026-11-16, tested on Python 3.14; the Docker image runs 3.12).
 # playwright must match the Docker base image tag (mcr.microsoft.com/playwright/python:v1.65.2-noble).
-# Direct dependencies: fastapi, uvicorn, playwright, pydantic, pillow, mcp, httpx, google-cloud-firestore, stripe. The rest are their dependencies.
+# Direct dependencies: fastapi, uvicorn, playwright, pydantic, pillow, mcp, httpx, google-cloud-firestore, stripe, pympp[tempo] (as pympp, pytempo). The rest are their dependencies.
 # stripe 17.0.0 added 2026-11-16 (needs requests and typing_extensions, both already pinned below).
+# pympp[tempo] 0.26.0 added 2026-11-23 for stablecoin payment (tempo.py): the Machine Payments Protocol's
+# official Python SDK checks Tempo transfers on the chain. Its "tempo" extra brings pytempo, web3 and the
+# eth-* stack (the rest of the lines added that day). Imported only when CALOTYPE_CREDITS_STABLECOIN=1.
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
 annotated-doc==0.0.6
 annotated-types==0.8.0
 anyio==4.16.0
 attrs==26.1.0
+bitarray==3.12.4
 certifi==2026.10.23
 cffi==2.1.1
 charset-normalizer==3.5.2
+ckzg==2.1.8
 click==8.5.1
 cryptography==50.0.2
+cytoolz==1.2.0
+eth-abi==5.2.0
+eth-account==0.14.0
+eth-hash==0.8.0
+eth-keyfile==0.10.0
+eth-keys==0.8.0
+eth-rlp==3.0.0
+eth-typing==6.0.0
+eth-utils==6.0.0
 fastapi==0.163.1
+frozenlist==1.8.0
 google-api-core==2.44.0
 google-auth==2.62.2
 google-cloud-core==2.8.0
@@ -21,6 +39,7 @@ greenlet==3.5.6
 grpcio-status==1.85.1
 grpcio==1.85.1
 h11==0.16.0
+hexbytes==2.0.0
 httpcore2==2.16.2
 httpcore==1.0.9
 httpx2==2.16.2
@@ -30,27 +49,43 @@ jsonschema-specifications==2025.9.1
 jsonschema==4.26.0
 mcp-types==2.3.0
 mcp==2.3.0
+multidict==6.9.1
 opentelemetry-api==1.45.2
 packaging==26.3
+parsimonious==0.10.0
 pillow==13.0.0
 playwright==1.65.2
+propcache==0.5.2
 proto-plus==1.29.0
 protobuf==7.36.2
-pyasn1==0.6.5
+py-ecc==8.0.0
 pyasn1_modules==0.4.2
+pyasn1==0.6.5
 pycparser==3.12
-pydantic==2.14.3
+pycryptodome==3.24.1
 pydantic_core==2.50.4
+pydantic==2.14.3
 PyJWT==2.15.1
+pympp==0.26.0
+pytempo==0.7.0
 python-multipart==0.0.34
+pyunormalize==18.0.0
 referencing==0.37.0
+regex==2026.11.19
 requests==2.34.2
+rfc8785==0.1.4
+rlp==5.0.0
 rpds-py==2026.9.1
 sse-starlette==3.7.0
 starlette==1.10.0
 stripe==17.0.0
+toolz==1.2.0
 truststore==0.10.5
-typing-inspection==0.4.5
+types-requests==2.33.0.20261030
 typing_extensions==4.16.0
+typing-inspection==0.4.5
 urllib3==2.8.0
 uvicorn==0.54.0
+web3==7.16.0
+websockets==15.0.1
+yarl==1.24.5
