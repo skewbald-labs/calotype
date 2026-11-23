@@ -129,7 +129,7 @@ uv build
 
 ## Changes
 
-- **0.1.1** (2026-11-23): no code change. The first release built and uploaded by GitHub Actions through PyPI trusted publishing, so the files carry attestations that tie them to this repository. No upload token exists any more.
+- **0.1.1** (2026-11-23): no code change. The first release built and uploaded by GitHub Actions through PyPI trusted publishing, so the files carry attestations that tie them to this repository.
 - **0.1.0** (2026-11-21): first release.
 
 ## License
