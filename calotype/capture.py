@@ -233,7 +233,8 @@ class Renderer:
             if params.delay_ms:
                 await asyncio.sleep(params.delay_ms / 1000)
 
-            image = await self._screenshot(page, params)
+            page_height = await self._page_height(page)
+            image = await self._screenshot(page, params, page_height)
             return CaptureResult(
                 image=image,
                 content_type=CONTENT_TYPES[params.format],
@@ -241,7 +242,9 @@ class Renderer:
                 truncated=session.exceeded,
                 blocked_requests=blocked + len(session.blocked_hosts),
                 duration_ms=int((time.monotonic() - started) * 1000),
-                meta={"egress_bytes": session.bytes_in},
+                # page_height: the whole scrolling page in CSS pixels (None if it could not be
+                # read), so a caller that asked for the first screen can tell how much is below it.
+                meta={"egress_bytes": session.bytes_in, "page_height": page_height},
                 final_url=page.url,
             )
         finally:
@@ -284,17 +287,25 @@ class Renderer:
             return not self.policy.ip_allowed(literal, port)
         return is_blocked_hostname(host)
 
-    async def _screenshot(self, page, params: ScreenshotParams) -> bytes:
+    async def _page_height(self, page) -> int | None:
+        """The height of the whole scrolling page in CSS pixels, or None when the page will not say."""
+        try:
+            height = await page.evaluate(
+                "() => Math.max(document.documentElement ? document.documentElement.scrollHeight : 0,"
+                " document.body ? document.body.scrollHeight : 0)"
+            )
+            return int(height) if height else None
+        except (PlaywrightError, asyncio.TimeoutError, TypeError, ValueError):
+            return None
+
+    async def _screenshot(self, page, params: ScreenshotParams, page_height: int | None = None) -> bytes:
         kind = "jpeg" if params.format == "jpeg" else "png"
         kwargs: dict = {"type": kind, "animations": "disabled", "caret": "hide"}
         if kind == "jpeg":
             kwargs["quality"] = params.effective_quality()
         if params.full_page:
             kwargs["full_page"] = True
-            height = await page.evaluate(
-                "() => Math.max(document.documentElement ? document.documentElement.scrollHeight : 0,"
-                " document.body ? document.body.scrollHeight : 0)"
-            )
+            height = page_height if page_height is not None else await self._page_height(page)
             cap = params.full_page_height_cap()
             if int(height or 0) > cap:
                 kwargs["clip"] = {"x": 0, "y": 0, "width": params.width, "height": cap}

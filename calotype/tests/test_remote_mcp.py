@@ -520,3 +520,43 @@ def test_upgrade_text_names_the_next_plan_and_price():
     assert "write to skewbald@agentmail.to" in upgrade_text(plans, plans["pro"], origin, True)
     assert upgrade_text(plans, plans["free"], origin, False) == (
         "Paid plans with more screenshots open soon: https://calotype.dev/pricing.")
+
+
+# --- the first screen and the rest of the page --------------------------------------------
+
+
+def _params(**kw):
+    from calotype.params import ScreenshotParams
+
+    return ScreenshotParams(url="https://example.com", **kw)
+
+
+def test_a_first_screen_of_a_long_page_says_so():
+    from calotype.remote_mcp import below_the_fold
+
+    text = below_the_fold(_params(), 14200)
+    assert "only the first screen" in text and "top 800 px" in text and "14,200 px tall" in text
+    assert "about 18 screens" in text and "full_page=true" in text
+
+
+@pytest.mark.parametrize("height", [None, 0, 800, 1000])
+def test_a_page_that_fits_the_screen_adds_nothing(height):
+    from calotype.remote_mcp import below_the_fold
+
+    assert below_the_fold(_params(), height) == ""
+
+
+def test_a_full_page_capture_says_only_when_it_was_cut():
+    from calotype.remote_mcp import below_the_fold
+
+    params = _params(full_page=True)
+    cap = params.full_page_height_cap()
+    assert below_the_fold(params, cap) == ""
+    text = below_the_fold(params, cap + 5000)
+    assert f"stops at {cap:,} px" in text and f"{cap + 5000:,} px tall" in text
+
+
+def test_the_tool_description_says_the_default_is_the_first_screen():
+    from calotype.remote_mcp import TOOL_DESCRIPTION
+
+    assert "first screen only" in TOOL_DESCRIPTION and "full_page=true" in TOOL_DESCRIPTION

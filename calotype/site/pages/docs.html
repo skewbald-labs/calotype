@@ -82,7 +82,7 @@
       <tr><td><code>url</code></td><td>required</td><td>The page to capture. <code>http</code> or <code>https</code> only, on a public address, at most 2,048 characters. Ports 80, 443 and 1024 and up. No <code>user:password@</code> in the address.</td></tr>
       <tr><td><code>width</code></td><td>1280</td><td>Viewport width in CSS pixels, 100 to 3840.</td></tr>
       <tr><td><code>height</code></td><td>800</td><td>Viewport height in CSS pixels, 100 to 2160.</td></tr>
-      <tr><td><code>full_page</code></td><td>false</td><td>Capture the whole scrolling page instead of the viewport. See the height cap below.</td></tr>
+      <tr><td><code>full_page</code></td><td>false</td><td>Capture the whole scrolling page instead of the viewport (the first screen). See the height cap below.</td></tr>
       <tr><td><code>format</code></td><td>png</td><td><code>png</code>, <code>jpeg</code> or <code>webp</code>. <code>jpg</code> is accepted as <code>jpeg</code>.</td></tr>
       <tr><td><code>quality</code></td><td>80</td><td>1 to 100, for <code>jpeg</code> and <code>webp</code> only. Sending it with <code>png</code> is an error.</td></tr>
       <tr><td><code>device_scale_factor</code></td><td>1</td><td>1 to 3, decimals allowed. Use 2 for sharp images on high-density screens.</td></tr>
@@ -108,6 +108,7 @@
       <tr><td><code>X-Calotype-Usage</code></td><td>Screenshots this key has used this month, and its limit, for example <code>12/100</code>.</td></tr>
       <tr><td><code>X-Calotype-Duration-Ms</code></td><td>How long the capture took.</td></tr>
       <tr><td><code>X-Calotype-Target-Status</code></td><td>The HTTP status the page answered with. A page that answers <code>404</code> or <code>500</code> is still captured, and still counts; check this header if that matters to you.</td></tr>
+      <tr><td><code>X-Calotype-Page-Height</code></td><td>The height of the whole scrolling page in CSS pixels. A default capture is the first screen only; compare this with <code>height</code> to see how much is below it. Left out when the page will not say.</td></tr>
       <tr><td><code>X-Calotype-Truncated</code></td><td><code>1</code> when the page passed the 50 MB download limit and the image shows what had loaded by then.</td></tr>
       <tr><td><code>X-Request-Id</code></td><td>On every response. Quote it to support.</td></tr>
     </tbody>

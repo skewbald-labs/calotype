@@ -11,6 +11,8 @@ export const SCREENSHOT_TOOL = {
   title: 'Screenshot a web page',
   description:
     'Take a screenshot of a public web page and return it as an image. ' +
+    'By default the image is the first screen only (the viewport, 1280x800); the result says how tall the ' +
+    'whole page is, and full_page=true captures all of it. ' +
     'Use it to see what a page looks like: its layout, text, charts or errors as rendered in Chromium. ' +
     'Only public http(s) pages; private and local addresses are refused. ' +
     "Each successful call counts as one screenshot against the key's monthly quota; failed ones do not. " +

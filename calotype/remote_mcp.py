@@ -110,6 +110,8 @@ INSTRUCTIONS = (
 
 TOOL_DESCRIPTION = (
     "Take a screenshot of a public web page and return it as an image. "
+    "By default the image is the first screen only (the viewport, 1280x800); the result says how tall the "
+    "whole page is, and full_page=true captures all of it. "
     "Use it to see what a page looks like: its layout, text, charts or errors as rendered in Chromium. "
     "Only public http(s) pages; private and local addresses are refused. "
     "Each successful call counts as one screenshot against the key's monthly quota; failed ones do not. "
@@ -430,10 +432,33 @@ def _summary(shot: Any) -> str:
         text += f" The page answered HTTP {result.target_status}."
     if result.truncated:
         text += " The page passed the 50 MB download limit; the image shows what had loaded by then."
+    text += below_the_fold(params, (result.meta or {}).get("page_height"))
     text += f" This key has used {shot.used} of {shot.limit} screenshots this month."
     if getattr(shot, "upgrade", ""):
         text += " " + shot.upgrade
     return text
+
+
+def below_the_fold(params: Any, page_height: int | None) -> str:
+    """One sentence for the agent when the image is not the whole page, else ''.
+
+    A default capture is the first screen only. Without this an agent cannot tell a short page
+    from the top of a very long one, and reports on a fraction of the page as if it were all of it.
+    """
+    if not page_height:
+        return ""
+    if params.full_page:
+        cap = params.full_page_height_cap()
+        if page_height > cap:
+            return f" The page is about {page_height:,} px tall; a full-page capture stops at {cap:,} px, so the rest is not shown."
+        return ""
+    if page_height <= params.height * 1.25:
+        return ""
+    screens = -(-page_height // params.height)
+    return (
+        f" This is only the first screen: the top {params.height:,} px of a page about {page_height:,} px tall"
+        f" (about {screens} screens). To see the rest, call again with full_page=true."
+    )
 
 
 def _dimensions(image: bytes) -> tuple[int, int] | None:

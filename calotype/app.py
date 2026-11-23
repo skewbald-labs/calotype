@@ -473,6 +473,9 @@ def create_app(
         }
         if result.target_status is not None:
             headers["X-Calotype-Target-Status"] = str(result.target_status)
+        if (result.meta or {}).get("page_height"):
+            # The whole scrolling page in CSS pixels, so a caller can tell a first screen from a whole page.
+            headers["X-Calotype-Page-Height"] = str(result.meta["page_height"])
         if result.truncated:
             headers["X-Calotype-Truncated"] = "1"
         if shot.credits is not None:

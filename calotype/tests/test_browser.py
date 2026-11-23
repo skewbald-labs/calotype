@@ -133,6 +133,13 @@ def test_end_to_end_screenshot(make_client, site, free_key):
     img = Image.open(io.BytesIO(r.content))
     assert img.size == (320, 20000)
     assert img.convert("RGB").getpixel((100, 19990)) == (0, 255, 0)
+    assert r.headers["x-calotype-page-height"] == "30000"
+    # A default capture is the first screen; the header says how tall the whole page is.
+    first = client.get(
+        "/v1/screenshot", params={"url": site.url("/tall"), "width": 320, "height": 200}, headers=auth(free_key)
+    )
+    assert first.status_code == 200 and Image.open(io.BytesIO(first.content)).size == (320, 200)
+    assert first.headers["x-calotype-page-height"] == "30000"
     r = client.get(
         "/v1/screenshot",
         params={"url": site.url("/tall"), "width": 320, "height": 200, "full_page": "true", "format": "webp"},

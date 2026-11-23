@@ -801,7 +801,8 @@ def test_with_oauth_on_the_pages_explain_it_and_claim_no_lack_of_it(oc):
         for phrase in STALE:
             assert phrase not in text, (path, phrase)
     assert 'id="connectors"' in pages["/agents"] and "Connect from claude.ai or ChatGPT" in pages["/agents"]
-    assert "not yet been tried from claude.ai or ChatGPT" in pages["/agents"]  # says what was not tested
+    assert "not yet been tried from ChatGPT" in pages["/agents"]  # says what was not tested
+    assert "Sign in when needed" in pages["/agents"]  # what to choose in Claude's add dialog
     assert 'id="oauth"' in pages["/docs"] and "no <code>expires_in</code> and no refresh token" in pages["/docs"]
     assert 'id="oauth"' in pages["/privacy"] and "authorization code record" in pages["/privacy"]
     assert "sign-in with OAuth, prepaid packs" in pages["/privacy"]

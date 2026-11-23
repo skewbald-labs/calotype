@@ -111,7 +111,7 @@ Each test writes under its own collection prefix and deletes it afterwards.
 | `block_ads` | false | blocks the domains in `adblock_domains.txt` and their subdomains |
 | `dark_mode` | false | sets `prefers-color-scheme: dark` |
 
-Unknown parameters are refused, so typos fail loudly. A capture has 30 seconds in total. The image comes back with headers `X-Calotype-Usage` (`used/limit`), `X-Calotype-Target-Status` and, if the page hit the byte cap, `X-Calotype-Truncated: 1`.
+Unknown parameters are refused, so typos fail loudly. A capture has 30 seconds in total. The image comes back with headers `X-Calotype-Usage` (`used/limit`), `X-Calotype-Target-Status`, `X-Calotype-Page-Height` (the whole page's height; the MCP tool says the same in words when the image is only the first screen) and, if the page hit the byte cap, `X-Calotype-Truncated: 1`.
 
 Errors are JSON, `{"error": {"code": ..., "message": ...}}`:
 
