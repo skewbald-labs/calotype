@@ -258,15 +258,20 @@ TRY_FORM_MARK = "<!--try-form-->"
 
 @dataclass(frozen=True)
 class TryLimits:
-    """The free-try limits the box states (from Settings); ``per_day`` 0 means tries are off."""
+    """The free-try limits the box states (from Settings). Either at 0 turns tries off."""
 
     per_ip_per_hour: int = 5
     per_day: int = 300
 
+    @property
+    def on(self) -> bool:
+        """Whether free tries are offered at all: a limit of 0 tries an hour or a day means off."""
+        return self.per_day > 0 and self.per_ip_per_hour > 0
+
 
 def try_form(site_dir: Path, limits: TryLimits, url: str = "") -> str:
     """The try box: a plain form that posts to /try, with the limits it states filled in."""
-    if limits.per_day <= 0:
+    if not limits.on:
         return ""
     form = (site_dir / "try-form.html").read_text(encoding="utf-8")
     form = form.replace("TRIES_PER_IP", f"{limits.per_ip_per_hour:,}").replace("TRIES_PER_DAY", f"{limits.per_day:,}")

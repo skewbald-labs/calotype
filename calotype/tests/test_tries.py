@@ -101,6 +101,11 @@ def test_the_box_states_the_configured_limits_and_goes_when_tries_are_off(make_c
     assert 'id="try-form"' not in off.get("/").text
     r = try_url(off, "https://example.com")
     assert r.status_code == 503 and "switched off" in r.text and KEY_COMMAND in r.text
+    # 0 tries an hour from an address means the same: off, never a 500.
+    off = make_client(tries_per_ip_per_hour=0)
+    assert 'id="try-form"' not in off.get("/").text
+    r = try_url(off, "https://example.com")
+    assert r.status_code == 503 and "switched off" in r.text and KEY_COMMAND in r.text
 
 
 def test_form_page_renders_and_a_link_only_fills_the_box(tc, renderer, store):

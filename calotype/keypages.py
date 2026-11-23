@@ -130,7 +130,7 @@ class BrowserPages:
         The same normalisation and the same checks the try box makes before any lookup:
         nothing is resolved and nothing is rendered here.
         """
-        if self.tries.per_day <= 0 or not raw.strip() or "access_key" in raw.lower():
+        if not self.tries.on or not raw.strip() or "access_key" in raw.lower():
             # A target that itself carries an access_key is left out, so no key is ever echoed.
             return None
         try:
@@ -189,7 +189,7 @@ class BrowserPages:
             offer = f"""  <p><a class="button" href="/try?url={html.escape(quote(target, safe=""))}">See this page captured now, no key needed</a></p>
   <p class="muted">That opens the try box with <code>{html.escape(target)}</code> filled in. Nothing is captured until you press its button.</p>
 """
-        elif self.tries.per_day > 0:
+        elif self.tries.on:
             offer = '  <p>To see a screenshot with no key, use the <a href="/try">try box</a>.</p>\n'
         else:
             offer = ""

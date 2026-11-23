@@ -240,10 +240,10 @@ It runs from a checkout of this repo (the working directory must contain `caloty
 | `CALOTYPE_CAPTURE_TIMEOUT_S` | 30 | per capture, capped at 30 |
 | `CALOTYPE_MAX_PAGE_BYTES` | 52428800 | network bytes per capture |
 | `CALOTYPE_SELF_SERVE_KEYS` | 1 | 0 turns off `POST /v1/keys` |
-| `CALOTYPE_KEYS_PER_IP_PER_HOUR` | 3 | self-serve keys per client IP |
-| `CALOTYPE_KEYS_GLOBAL_PER_HOUR` | 200 | self-serve keys overall |
+| `CALOTYPE_KEYS_PER_IP_PER_HOUR` | 3 | self-serve keys per client IP; 0 refuses every one with 429 `rate_limited` (to turn keys off, use `CALOTYPE_SELF_SERVE_KEYS`) |
+| `CALOTYPE_KEYS_GLOBAL_PER_HOUR` | 200 | self-serve keys overall; 0 as above |
 | `CALOTYPE_CREDIT_PAYMENTS_PER_KEY_PER_HOUR` | 10 | payment credentials one key may send to `POST /v1/credits` |
-| `CALOTYPE_TRIES_PER_IP_PER_HOUR` | 5 | free tries per client IP (in memory) |
+| `CALOTYPE_TRIES_PER_IP_PER_HOUR` | 5 | free tries per client IP (in memory); 0 turns the box off |
 | `CALOTYPE_TRIES_PER_DAY` | 300 | free-try renders per UTC day for everyone (in storage); 0 turns the box off |
 | `CALOTYPE_TRUSTED_PROXY_HOPS` | 0 | proxies whose `X-Forwarded-For` entry is trusted. Set 1 on Cloud Run |
 | `CALOTYPE_LOG_LEVEL` | INFO | |

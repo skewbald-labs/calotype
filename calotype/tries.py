@@ -192,13 +192,13 @@ def add_try_routes(app: FastAPI, *, settings: Settings, policy: AddressPolicy, r
     async def try_form_page(request: Request):
         # A link to /try?url=... fills the box in; only the button starts a capture.
         url = request.query_params.get("url", "")[:MAX_URL_LENGTH]
-        if limits.per_day <= 0:
+        if not limits.on:
             return form_page("", Outcome("", 200, "Free tries are switched off right now."), with_key_steps=True)
         return form_page(url)
 
     @app.post("/try", include_in_schema=False)
     async def take_try(request: Request):
-        if limits.per_day <= 0:
+        if not limits.on:
             return form_page("", Outcome("", 503, "Free tries are switched off right now."), with_key_steps=True)
         if posted_from_another_site(request):
             return form_page("", Outcome("", 403, "Tries start from the form on Calotype's own site."))

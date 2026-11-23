@@ -127,6 +127,25 @@ def test_limiter_window_expires():
     assert lim.check("a")[0]
 
 
+def test_a_limit_of_zero_refuses_every_attempt_and_holds_nothing():
+    lim = SlidingWindowLimiter(0, window_s=3600)
+    assert [lim.check("a") for _ in range(3)] == [(False, 3600)] * 3
+    assert lim.tracked() == 0
+    assert SlidingWindowLimiter(-1, window_s=0.5).check("a") == (False, 1)
+
+
+@pytest.mark.parametrize("setting", ["keys_per_ip_per_hour", "keys_global_per_hour"])
+def test_a_key_limit_of_zero_answers_the_normal_429_not_a_500(settings, store, setting):
+    with make_client(settings, store, **{setting: 0}) as c:
+        r = c.post("/v1/keys")
+        assert r.status_code == 429, r.text
+        assert r.json()["error"]["code"] == "rate_limited" and r.headers["retry-after"] == "3600"
+        # The key form for people goes through the same limits.
+        r = c.post("/keys", data={"ref": "web"}, headers={"Accept": "text/html", "Sec-Fetch-Site": "same-origin"})
+        assert r.status_code == 429, r.text
+    assert store.list_keys() == []
+
+
 def test_limiter_memory_is_bounded():
     now = [0.0]
     lim = SlidingWindowLimiter(1, window_s=60, max_tracked=100, clock=lambda: now[0])

@@ -32,7 +32,11 @@ class SlidingWindowLimiter:
         """Record one attempt for ``bucket`` if allowed.
 
         Returns (allowed, seconds until the next attempt would be allowed).
+        A limit of 0 or less allows nothing: every attempt is refused, with a
+        whole window to wait, and no bucket is held for it.
         """
+        if self.limit <= 0:
+            return False, max(int(self.window_s), 1)
         now = self._clock()
         with self._lock:
             if len(self._hits) >= self.max_tracked:
