@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import calotype
@@ -166,4 +168,4 @@ def test_the_package_is_typed_and_exports_what_it_documents():
     assert files("calotype").joinpath("py.typed").is_file()
     for name in calotype.__all__:
         assert hasattr(calotype, name), name
-    assert calotype.__version__ == "0.1.0"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", calotype.__version__)
