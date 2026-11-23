@@ -1,6 +1,6 @@
 # Publishing the client packages
 
-Nothing in `clients/` is published yet. This page is the checklist for the day it is: what each registry asks of the account holder, the one-time setup, and the steps for each release. It was written on 21 November 2026 from the registries' own documentation as it read that day; the pages are listed under [Sources](#sources). Read them again before the first publish, because npm in particular has changed its rules several times this year.
+**Status, 23 November 2026:** `calotype` is on PyPI (0.1.0 was uploaded on 21 November with a token; from 0.1.1 it is published by the workflow through a trusted publisher bound to the `pypi` environment, which deploys from `main` only). The two npm packages are not published yet. This page is the checklist for each registry: what each registry asks of the account holder, the one-time setup, and the steps for each release. It was written on 21 November 2026 from the registries' own documentation as it read that day; the pages are listed under [Sources](#sources). Read them again before the first publish, because npm in particular has changed its rules several times this year.
 
 | Package | Registry | Directory | Name free on 21 Nov 2026? |
 |---|---|---|---|
