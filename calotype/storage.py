@@ -43,7 +43,8 @@ every instance at once.
 The funnel (``funnel.py``) is counted the same way, per UTC day and per step
 (``FunnelDay``): how often an agent looked at the MCP tool without a key,
 called it without one, sent a wrong key, probed for OAuth, looked for a key
-page that does not exist, made a key, and took a key's first screenshot.
+page that does not exist, was shown a help page in a browser, made a key
+(by the API or the site's button), and took a key's first screenshot.
 Counts only: never a URL, a key, a user agent or an IP address.
 OAuth sign-in on ``/mcp`` (``oauth.py``) stores one short-lived record per
 authorization code (``OAuthCode``): the SHA-256 hash of the code (never the
@@ -199,8 +200,10 @@ class FunnelDay:
     bad_key: int = 0  # 401 on /v1/screenshot or /mcp for a key that was sent but is wrong or revoked
     oauth_probe: int = 0  # a request for OAuth metadata or an OAuth step, whatever the answer
     key_miss: int = 0  # a 404 or 405 on a path where a key or a sign-up might be (funnel.KEY_MISS_PATHS)
-    key_refused: int = 0  # POST /v1/keys refused: rate limited, bad email, switched off
-    key_made: int = 0  # POST /v1/keys made a key
+    api_page: int = 0  # a browser on GET /mcp, /v1/screenshot or /v1/keys was shown a help page (keypages.py)
+    key_refused: int = 0  # POST /v1/keys or the site's key button refused: rate limited, bad email, switched off
+    key_made: int = 0  # POST /v1/keys or the site's key button made a key
+    web_key: int = 0  # the site's "Get a free key" button made a key (also counted in key_made)
     first_capture: int = 0  # a non-internal key's first successful screenshot
 
 

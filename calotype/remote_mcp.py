@@ -45,6 +45,8 @@ What this module adds around the SDK:
   listing that brought it. It is never the key, and a bad tag is ignored.
 * **Methods.** Only POST. Stateless, the server has no stream to offer on
   GET and no session to end on DELETE; both answer 405, as the spec allows.
+  A browser's GET (``Accept`` names ``text/html`` and no event stream) gets
+  the same 405 as a short page for a person (``keypages.py``).
 * **One capture path.** The tool calls the app's ``capture_for_key``, the
   function behind ``/v1/screenshot``: the same plan check, parameter limits,
   SSRF policy, quota, refund of failed captures, and logging.
@@ -125,7 +127,11 @@ class RemoteMCP:
         tag_source: Callable[[Any, str], Awaitable[None]] | None = None,
         challenge: Callable[[Request, str | None], str] | None = None,
         challenge_keyless_calls: bool = False,
+        browser_page: Callable[[Request], Any] | None = None,
     ):
+        # With the site on: the page a browser gets when a person opens this address
+        # (keypages.BrowserPages.mcp). It returns None for anything that is not a browser's GET.
+        self._browser_page = browser_page
         # With OAuth on: the WWW-Authenticate value for a 401 (oauth.OAuthServer.challenge_for),
         # and whether a keyless tools/call answers 401 rather than a tool error.
         self._challenge = challenge
@@ -234,6 +240,13 @@ class RemoteMCP:
             )
             return
         if request.method != "POST":
+            # A person who followed a directory's link here in a browser gets a page that says
+            # what this address is, with the same 405 and Allow header. Any client that asks
+            # for an event stream, or does not ask for HTML, gets the JSON below as before.
+            page = self._browser_page(request) if self._browser_page is not None else None
+            if page is not None:
+                await page(scope, receive, send)
+                return
             # Stateless: no server-to-client stream (GET) and no session to end
             # (DELETE). The transport spec allows 405 for both.
             await _rpc_error(

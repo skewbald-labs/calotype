@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>{{title}}</title>
-<meta name="description" content="{{description}}">
+<meta name="description" content="{{description}}">{{robots}}
 <link rel="canonical" href="{{canonical}}">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Calotype">
@@ -111,6 +111,9 @@
   .tryrow { display: flex; gap: 10px; flex-wrap: wrap; }
   .tryrow input { flex: 1 1 260px; min-width: 0; font: 15px/1.4 var(--mono); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; }
   form.try .muted { margin: 10px 0 0; }
+  form.getkey { margin: 16px 0; }
+  form.getkey .muted { margin: 8px 0 0; }
+  .keybox.shown code.newkey { user-select: all; }
   figure.shot { margin: 20px 0 28px; }
   figure.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; }
   figure.shot figcaption { color: var(--muted); font-size: 14px; margin-top: 8px; }
@@ -158,6 +161,17 @@
   (function () {
     if (location.protocol !== "http:" && location.protocol !== "https:") return;
     document.querySelectorAll(".origin").forEach(function (el) { el.textContent = location.origin; });
+  })();
+</script>
+<script>
+  // A "Get a free key" form on a page reached by a link like /?ref=dt-linkedin sends that tag
+  // with it, as the key button below does. A form that already has a tag keeps it.
+  (function () {
+    var ref = new URLSearchParams(location.search).get("ref");
+    if (!ref || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(ref)) return;
+    document.querySelectorAll('form.getkey input[name="ref"]').forEach(function (el) {
+      if (!el.value) el.value = ref;
+    });
   })();
 </script>
 <script>

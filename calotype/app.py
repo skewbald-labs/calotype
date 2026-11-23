@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
 from .billing import (
@@ -37,6 +38,7 @@ from .credits import HANDLED_EVENTS as CREDIT_EVENTS
 from .credits import MIN_CARD_CENTS
 from .credits import UNAVAILABLE_MESSAGE as CREDITS_UNAVAILABLE_MESSAGE
 from .credits import CreditsProvider, PaymentRefused, PaymentUnconfirmed, credits_from_env
+from .keypages import BrowserPages, add_key_routes
 from .logs import log_event, setup_logging
 from .oauth import OAuthServer, add_oauth_routes, oauth_enabled
 from .notices import mask_email, normalize_email, notices_enabled, thresholds_at, token_key_id, token_matches
@@ -324,6 +326,12 @@ def create_app(
 
     site_origin = (settings.public_url or SITE_ORIGIN).rstrip("/")
 
+    # With the site on, a browser that opens an API-only address gets a help page instead of a
+    # bare JSON error (keypages.py). Programs, and a server without the site, get the JSON as before.
+    site_on = settings.serve_site and SITE_DIR.is_dir()
+    try_limits = TryLimits(settings.tries_per_ip_per_hour, settings.tries_per_day)
+    browser_pages = BrowserPages(site_dir=SITE_DIR, settings=settings, tries=try_limits) if site_on else None
+
     def credits_text() -> str:
         """For a key out of quota: that prepaid screenshots can be bought, where that is on."""
         if not credits.configured or not credit_packs:
@@ -478,6 +486,7 @@ def create_app(
         tag_source=lambda key, tag: asyncio.to_thread(app.state.storage.tag_source, key.id, tag),
         challenge=oauth.challenge_for if oauth else None,
         challenge_keyless_calls=settings.mcp_keyless_call != "result",
+        browser_page=browser_pages.mcp if browser_pages else None,
     )
     app.state.mcp = mcp
     app.add_route("/mcp", mcp, methods=["GET", "POST", "DELETE"], include_in_schema=False)
@@ -496,7 +505,15 @@ def create_app(
     @app.get("/v1/screenshot")
     async def screenshot_get(request: Request):
         data = {k: v for k, v in request.query_params.items() if k != "access_key"}
-        return await handle_screenshot(request, data)
+        try:
+            return await handle_screenshot(request, data)
+        except ApiError as e:
+            # A person who opened an example link in a browser, with no key or a placeholder:
+            # the same 401, as a page that says what to do. Programs get the JSON error.
+            page = browser_pages.screenshot(request, e.code, e.headers) if browser_pages and e.status == 401 else None
+            if page is None:
+                raise
+            return page
 
     @app.post("/v1/screenshot")
     async def screenshot_post(request: Request):
@@ -509,21 +526,23 @@ def create_app(
         data.pop("access_key", None)
         return await handle_screenshot(request, data)
 
-    @app.post("/v1/keys", status_code=201)
-    async def create_free_key(request: Request):
-        """Create a free-plan key. Asks for nothing; an email address for quota notices is optional."""
+    async def issue_free_key(
+        request: Request, *, email: Any = None, ref: Any = None, default_ref: str = ""
+    ) -> tuple[str, ApiKey, str | None, str | None]:
+        """Make a free-plan key: the one path for ``POST /v1/keys`` and the site's key button (keypages.py).
+
+        Every check lives here, so both share it: the switch for self-serve keys, the optional
+        email address, the per-IP and overall limits, and the source tag. Raises ``ApiError``
+        for a refusal. Returns the key (the only time it exists in the clear), its record, the
+        address as given and normalized, and the address as stored (None with quota emails off).
+        """
         if not settings.self_serve_keys or "free" not in settings.plans:
             raise ApiError(403, "self_serve_disabled", "Self-serve keys are not available right now.")
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        body = body if isinstance(body, dict) else {}
-        # Optional {"email": ...}, checked before the rate limit so a typo costs no slot.
-        email = None
-        if body.get("email") not in (None, ""):
-            email = normalize_email(body.get("email"))
-            if email is None:
+        # Optional email, checked before the rate limit so a typo costs no slot.
+        normalized = None
+        if email not in (None, ""):
+            normalized = normalize_email(email)
+            if normalized is None:
                 raise ApiError(400, "invalid_email", INVALID_EMAIL)
         ip = client_ip(
             request.client.host if request.client else None,
@@ -542,18 +561,29 @@ def create_app(
                 {"Retry-After": str(retry)},
                 retry_after_s=retry,
             )
-        # Optional {"ref": "<tag>"} from the site's key button, copied from the
-        # page's ?ref= tag. Anything that is not a valid tag is ignored, never an error.
-        label = ""
-        ref = body.get("ref")
-        if isinstance(ref, str) and REF_TAG.match(ref):
-            label = REF_LABEL_PREFIX + ref
+        # An optional source tag, copied from a page's ?ref= by the site's key button or its
+        # form. Anything that is not a valid tag is ignored, never an error; ``default_ref``
+        # (the form's "web") then names the source.
+        tag = ref if isinstance(ref, str) and REF_TAG.match(ref) else default_ref
+        label = REF_LABEL_PREFIX + tag if tag else ""
         # With the feature off, an address is not stored at all.
-        stored_email = email if notices_on else None
+        stored_email = normalized if notices_on else None
         raw, key = await asyncio.to_thread(
             app.state.storage.create_key, "free", label, internal=False, email=stored_email
         )
         request.state.key_id = key.id
+        return raw, key, normalized, stored_email
+
+    @app.post("/v1/keys", status_code=201)
+    async def create_free_key(request: Request):
+        """Create a free-plan key. Asks for nothing; an email address for quota notices is optional."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        body = body if isinstance(body, dict) else {}
+        # Optional {"email": ...} and {"ref": "<tag>"}; issue_free_key checks both.
+        raw, _key, email, stored_email = await issue_free_key(request, email=body.get("email"), ref=body.get("ref"))
         plan = settings.plans["free"]
         answer: dict[str, Any] = {
             "key": raw,
@@ -566,6 +596,16 @@ def create_app(
             if not notices_on:
                 answer["email_message"] = NOTICES_OFF + " The address was not stored."
         return JSONResponse(answer, status_code=201, headers={"Cache-Control": "no-store"})
+
+    if browser_pages is not None:
+        # After the POST route, so any other method still answers 405 with "Allow: POST".
+        @app.get("/v1/keys", include_in_schema=False)
+        async def keys_in_a_browser(request: Request):
+            """A browser gets a page that says keys are made with a POST; a program, the 405 it always got."""
+            page = browser_pages.keys(request)
+            if page is None:
+                raise StarletteHTTPException(405, headers={"Allow": "POST"})
+            return page
 
     def email_state(email: str | None) -> dict[str, Any]:
         """What the API says about a key's address: masked, never in full."""
@@ -870,10 +910,14 @@ def create_app(
             body["credit_packs"] = [pack_json(p) for p in credit_packs.values()]
         return body
 
-    if settings.serve_site and SITE_DIR.is_dir():
-        tries = TryLimits(settings.tries_per_ip_per_hour, settings.tries_per_day)
-        add_site_routes(app, SITE_DIR, paid_open=billing.configured, tries=tries, oauth_on=oauth is not None)
+    if browser_pages is not None:
+        add_site_routes(
+            app, SITE_DIR, paid_open=billing.configured, tries=try_limits, oauth_on=oauth is not None,
+            free_quota=browser_pages.free_quota,
+        )
         # The home page's try box: a capture with no key, under its own limits.
         add_try_routes(app, settings=settings, policy=policy, renderer=renderer, site_dir=SITE_DIR)
+        # The "Get a free key" button: POST /keys makes a key by the same path as POST /v1/keys.
+        add_key_routes(app, browser_pages, issue_key=issue_free_key, api_error=ApiError)
 
     return app

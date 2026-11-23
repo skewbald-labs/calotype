@@ -1,6 +1,6 @@
   <h1>Privacy notice</h1>
   <p class="lede">Calotype is built to know as little about you as it can. This page says exactly what it keeps, what it logs, and what it never stores.</p>
-  <p class="muted">Last changed 22 November 2026: <!--oauth-->sign-in with OAuth, <!--/oauth-->prepaid packs, and daily counts of the steps toward a key.</p>
+  <p class="muted">Last changed 23 November 2026: the "Get a free key" button and its tag, and two more daily counts. Before that, 22 November 2026: <!--oauth-->sign-in with OAuth, <!--/oauth-->prepaid packs, and daily counts of the steps toward a key.</p>
 
   <h2 id="who">Who is responsible</h2>
   <p>Calotype is sold by Dostal Technology, a Texas company, and built and run by Skewbald, an AI agent. Questions about this notice, and requests about your data, go to <a href="mailto:skewbald@agentmail.to">skewbald@agentmail.to</a>.</p>
@@ -24,6 +24,7 @@
     <li>whether and when the key was revoked;</li>
     <li>for Calotype's own keys, a flag saying so: keys made by its operator rather than through the website, which may also carry a short label, and test keys its operator made through the website;</li>
     <li>if you reached the site through a link tagged like <code>?ref=dt-linkedin</code>, that tag. Calotype chooses these tags for its own posts, so they show which post brought a key. They say nothing about you;</li>
+    <li>for a key made with the "Get a free key" button, a tag for where the button was: the tag of the link you followed if it had one, else <code>web</code>, <code>try</code>, <code>mcp-link</code> or <code>api-link</code>. It names a page, not you. The button asks for nothing and sets no cookie;</li>
     <li>for paid keys only, the Stripe customer id and subscription id, which link the key to its subscription;</li>
     <li>for keys that bought a <a href="/docs#credits">prepaid pack</a>, the prepaid balance and one record per purchase: the pack, its size and price, the Stripe payment id, when it was paid, and when it was refunded if it was;</li>
     <li>only if you gave one, an email address for <a href="#quota-emails">quota emails</a>, and a record of each quota email queued for the key.</li>
@@ -31,7 +32,7 @@
   </ul>
   <p>It also keeps the ids of the Stripe webhook events it has handled, so that a repeated event is not applied twice. Those ids say nothing about you.</p>
   <p>For the <a href="#tries">free tries</a>, it keeps one record per day (UTC) with counts only: how many tries there were, how many were rendered, and how many succeeded, failed, were refused, were over the hourly limit or came after the daily limit. No address, host, IP address or image.</p>
-  <p>To see where people and agents get stuck on the way to a key, it also keeps one record per day (UTC) with counts only: how many times the MCP tool was listed or called without a key, a wrong key was sent, OAuth sign-in was looked for, a key or sign-up page that does not exist was asked for, a key was refused or made, and a key took its first screenshot. No address, key, IP address or browser name.</p>
+  <p>To see where people and agents get stuck on the way to a key, it also keeps one record per day (UTC) with counts only: how many times the MCP tool was listed or called without a key, a wrong key was sent, OAuth sign-in was looked for, a key or sign-up page that does not exist was asked for, a browser that opened an API address was shown a help page, a key was refused or made, a key was made with the button, and a key took its first screenshot. No address, key, IP address or browser name.</p>
   <p>That is all. There is no name, IP address, address of a captured page or image in the database, and no email address unless you added one.</p>
 
   <h2 id="quota-emails">Quota emails (optional)</h2>

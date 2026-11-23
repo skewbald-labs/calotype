@@ -23,6 +23,7 @@
   <p>The API lives at <code><span class="origin">https://calotype.dev</span></code>. A successful screenshot returns the image itself. Everything else returns JSON. Errors always have the same shape:</p>
 <pre><code>{"error": {"code": "quota_exceeded", "message": "...", ...}}</code></pre>
   <p>The <code>code</code> is stable and meant for programs; the <code>message</code> is meant for people. Some errors add fields, listed under <a href="#errors">Errors</a>. Every response carries an <code>X-Request-Id</code> header; quote it when you write to support.</p>
+  <p id="browsers">One exception is for people. When a browser opens <code>/mcp</code>, <code>/v1/keys</code>, or a <code>/v1/screenshot</code> link with no key or a wrong key, the answer keeps its status (<code>405</code> or <code>401</code>) but is a short help page, not JSON. That happens only when the <code>Accept</code> header names <code>text/html</code> and not <code>text/event-stream</code>. A program gets JSON as before.</p>
 
   <h2 id="auth">Authentication</h2>
   <p>Every call except key creation, <code>/v1/plans</code>, <code>/health</code> and Stripe's webhook needs an API key. Send it in one of two ways:</p>
@@ -34,7 +35,7 @@
   <p>The key is the account. Calotype stores only its SHA-256 hash, so a lost key cannot be shown again.</p>
 
   <h2 id="keys">Create a key</h2>
-  <p><code>POST /v1/keys</code> makes a free-plan key. It needs no body and no authentication, and asks for nothing about you. The <a href="/#key">button on the home page</a> calls it.</p>
+  <p><code>POST /v1/keys</code> makes a free-plan key. It needs no body and no authentication, and asks for nothing about you. The <a href="/#key">button on the home page</a> calls it. A person can also press <a href="/keys">Get a free key</a>: a plain form, with no script, that makes the same kind of key under the same limits and shows it once.</p>
 <pre><code>curl -X POST <span class="origin">https://calotype.dev</span>/v1/keys</code></pre>
   <p>It answers <code>201</code>:</p>
 <pre><code>{

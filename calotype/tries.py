@@ -49,7 +49,7 @@ from starlette.responses import Response
 from .capture import CaptureError, CaptureResult
 from .config import Settings
 from .logs import log_event
-from .pages import TryLimits, render_document, try_form
+from .pages import TryLimits, key_form, posted_from_another_site, render_document, try_form
 from .params import ScreenshotParams
 from .ratelimit import client_ip
 from .ssrf import MAX_URL_LENGTH, AddressPolicy, BlockedTarget, ParsedTarget
@@ -60,6 +60,9 @@ log = logging.getLogger("calotype.try")
 WIDTH, HEIGHT = 1280, 800
 FORMAT, QUALITY = "jpeg", 70
 MAX_FORM_BYTES = 8 * 1024
+
+# The source tag on a key made from a try: in the key command, the MCP URL and the key button.
+TRY_REF = "try"
 
 TITLE = "Try Calotype: a screenshot of any public page"
 DESCRIPTION = "Paste the address of a public web page and see Calotype's screenshot of it, with no key."
@@ -88,23 +91,27 @@ class Outcome:
     headers: dict | None = None
 
 
-def key_steps(free_quota: int | None) -> str:
-    """The next step after a try: a free key in one line, the MCP URL, and the agents page.
+def key_steps(free_quota: int | None, button: str = "") -> str:
+    """The next step after a try: a free key in one line or one click, the MCP URL, and the agents page.
 
     The key command and the MCP URL carry the tag ``try``: a key made with
     ``{"ref": "try"}`` is labelled with it (app.py), and an untagged key is
     labelled on its first call to ``/mcp?ref=try`` (remote_mcp.py). The
-    ``/agents?ref=try`` page's key button sends the same tag.
+    ``/agents?ref=try`` page's key button sends the same tag, and so does
+    ``button``, the "Get a free key" form (``pages.key_form``) when keys can be made.
     """
     quota = f" and comes with {free_quota:,} screenshots a month" if free_quota else ""
+    click = f"  <p>Or with one click:</p>\n{button}" if button else ""
     return f"""  <p>Make a free key in one line. It asks for nothing{quota}:</p>
 <pre><code>curl -X POST <span class="origin">https://calotype.dev</span>/v1/keys -d '{{"ref":"try"}}'</code></pre>
-  <p>Then add the MCP server <code><span class="origin">https://calotype.dev</span>/mcp?ref=try</code> to your agent, with the header <code>Authorization: Bearer cal_...</code>. Set-up for Claude Code, Cursor, VS Code and other clients, and a key button, are on <a href="/agents?ref=try">For agents</a>.</p>
+{click}  <p>Then add the MCP server <code><span class="origin">https://calotype.dev</span>/mcp?ref=try</code> to your agent, with the header <code>Authorization: Bearer cal_...</code>. Set-up for Claude Code, Cursor, VS Code and other clients, and a key button, are on <a href="/agents?ref=try">For agents</a>.</p>
   <p class="muted">The <code>try</code> tag is stored on the new key only to show that it came from a try. It says nothing about you.</p>
 """
 
 
-def result_content(shot: CaptureResult, target: ParsedTarget, form: str, free_quota: int | None) -> str:
+def result_content(
+    shot: CaptureResult, target: ParsedTarget, form: str, free_quota: int | None, button: str = ""
+) -> str:
     where = html.escape(target.display)
     data = base64.b64encode(shot.image).decode("ascii")
     notes = [f"{WIDTH} × {HEIGHT}", "JPEG", "ads blocked", f"taken in {shot.duration_ms / 1000:.1f} s"]
@@ -120,14 +127,16 @@ def result_content(shot: CaptureResult, target: ParsedTarget, form: str, free_qu
   </figure>
 
   <h2 id="next">Give your agent the same view</h2>
-{key_steps(free_quota)}
+{key_steps(free_quota, button)}
   <h2 id="again">Try another page</h2>
 {form}"""
 
 
-def message_content(outcome: Outcome, form: str, free_quota: int | None, with_key_steps: bool) -> str:
+def message_content(
+    outcome: Outcome, form: str, free_quota: int | None, with_key_steps: bool, button: str = ""
+) -> str:
     text = f'  <p class="error" role="alert">{html.escape(outcome.message)}</p>\n' if outcome.message else ""
-    steps = f'  <h2 id="next">A free key instead</h2>\n{key_steps(free_quota)}' if with_key_steps else ""
+    steps = f'  <h2 id="next">A free key instead</h2>\n{key_steps(free_quota, button)}' if with_key_steps else ""
     return f"""  <h1>Try Calotype</h1>
   <p class="lede">Paste the address of a public web page to see Calotype's screenshot of it.</p>
 {text}{form}{steps}"""
@@ -137,6 +146,8 @@ def add_try_routes(app: FastAPI, *, settings: Settings, policy: AddressPolicy, r
     """``GET /try`` shows the form; ``POST /try`` takes one try and shows the image."""
     limits = TryLimits(settings.tries_per_ip_per_hour, settings.tries_per_day)
     free_quota = settings.plans["free"].monthly_quota if "free" in settings.plans else None
+    # The "Get a free key" button under the key command, tagged like the command; none with keys off.
+    button = key_form(site_dir, free_quota if settings.self_serve_keys else None, TRY_REF)
 
     def page(content: str, status: int = 200, headers: dict | None = None) -> Response:
         doc = render_document(site_dir, path="/try", title=TITLE, description=DESCRIPTION, content=content)
@@ -157,7 +168,7 @@ def add_try_routes(app: FastAPI, *, settings: Settings, policy: AddressPolicy, r
 
     def form_page(url: str, outcome: Outcome | None = None, with_key_steps: bool = False) -> Response:
         outcome = outcome or Outcome("", 200)
-        content = message_content(outcome, try_form(site_dir, limits, url), free_quota, with_key_steps)
+        content = message_content(outcome, try_form(site_dir, limits, url), free_quota, with_key_steps, button)
         return page(content, outcome.status, outcome.headers)
 
     def count(day: str, outcome: str) -> None:
@@ -189,7 +200,7 @@ def add_try_routes(app: FastAPI, *, settings: Settings, policy: AddressPolicy, r
     async def take_try(request: Request):
         if limits.per_day <= 0:
             return form_page("", Outcome("", 503, "Free tries are switched off right now."), with_key_steps=True)
-        if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        if posted_from_another_site(request):
             return form_page("", Outcome("", 403, "Tries start from the form on Calotype's own site."))
         body = await request.body()
         if len(body) > MAX_FORM_BYTES:
@@ -272,4 +283,4 @@ def add_try_routes(app: FastAPI, *, settings: Settings, policy: AddressPolicy, r
             blocked_requests=shot.blocked_requests,
             truncated=shot.truncated,
         )
-        return page(result_content(shot, target, try_form(site_dir, limits), free_quota))
+        return page(result_content(shot, target, try_form(site_dir, limits), free_quota, button))

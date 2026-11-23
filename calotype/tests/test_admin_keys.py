@@ -328,17 +328,21 @@ def test_admin_funnel_prints_daily_counts_and_a_total(admin_store, capsys):
     yesterday = current_day(datetime.now(UTC) - timedelta(days=1))
     admin_store.record_funnel(today, "looked")
     admin_store.record_funnel(today, "key_made")
+    admin_store.record_funnel(today, "web_key")
+    admin_store.record_funnel(today, "api_page")
     admin_store.record_funnel(yesterday, "looked")
+    admin_store.record_funnel(yesterday, "api_page")
     assert admin.main(["funnel", "--days", "3"]) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "day\t" + "\t".join(FUNNEL_EVENTS)
     assert lines[0].split("\t")[1:] == [
-        "looked", "tool_no_key", "bad_key", "oauth_probe", "key_miss", "key_refused", "key_made", "first_capture",
+        "looked", "tool_no_key", "bad_key", "oauth_probe", "key_miss", "api_page", "key_refused", "key_made",
+        "web_key", "first_capture",
     ]
-    assert lines[1] == f"{today}\t1\t0\t0\t0\t0\t0\t1\t0"
-    assert lines[2] == f"{yesterday}\t1\t0\t0\t0\t0\t0\t0\t0"
-    assert lines[3].endswith("\t0\t0\t0\t0\t0\t0\t0\t0")
-    assert lines[4] == "total\t2\t0\t0\t0\t0\t0\t1\t0"
+    assert lines[1] == f"{today}\t1\t0\t0\t0\t0\t1\t0\t1\t1\t0"
+    assert lines[2] == f"{yesterday}\t1\t0\t0\t0\t0\t1\t0\t0\t0\t0"
+    assert lines[3].endswith("\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0")
+    assert lines[4] == "total\t2\t0\t0\t0\t0\t2\t0\t1\t1\t0"
     assert len(lines) == 5
     with pytest.raises(SystemExit):
         admin.main(["funnel", "--days", "0"])

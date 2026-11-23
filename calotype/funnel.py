@@ -27,11 +27,23 @@ The steps, and how each is seen:
 ``key_miss``
     404 or 405 on a path where an agent might look for a key or a sign-up
     (``KEY_MISS_PATHS``), such as ``GET /v1/keys`` or ``/signup``.
+``api_page``
+    A browser that opened an API-only address was shown a help page instead
+    of a bare JSON error: ``GET /mcp``, ``GET /v1/keys``, or ``GET
+    /v1/screenshot`` with no key or a wrong one (``keypages.py`` marks it).
+    The request's other steps still count: ``GET /v1/keys`` is also a
+    ``key_miss``, and a wrong key is also a ``bad_key``.
 ``key_refused``
     ``POST /v1/keys`` answered with an error: rate limited, a bad email
-    address, self-serve keys switched off.
+    address, self-serve keys switched off. Also the site's key button
+    (``POST /keys``) when the same checks refuse it.
 ``key_made``
-    ``POST /v1/keys`` answered 201.
+    ``POST /v1/keys`` answered 201, or the site's key button made a key. A
+    key made on the OAuth consent page is not counted here.
+``web_key``
+    The site's "Get a free key" button (``POST /keys``) made a key. Each one
+    is also a ``key_made``, so ``key_made - web_key`` is the keys made by
+    ``POST /v1/keys``: programs, and the script button on the home page.
 ``first_capture``
     A non-internal key's first successful screenshot, through the API or the
     MCP tool. ``app.capture_for_key`` marks it with ``mark``.
@@ -91,7 +103,7 @@ KEY_MISS_PATHS = frozenset({
     "/api/keys",
     "/api/v1/keys",
     "/api-keys",
-    "/keys",
+    "/keys",  # GET now shows the key button (keypages.py), so only other methods' 405 count
     "/signup",
     "/sign-up",
     "/register",
@@ -108,7 +120,7 @@ LOOK_METHODS = frozenset({"initialize", "tools/list"})
 # are small; a bigger body is not looked at.
 MAX_PEEK_BYTES = 64 * 1024
 
-# Where capture_for_key leaves a step for the middleware to count, in the request's state.
+# Where a handler (capture_for_key, keypages.py) leaves a step for the middleware to count, in the request's state.
 _STATE_EVENTS = "funnel_events"
 
 # Writes waiting or running at once before new counts are dropped (storage is slow or down).

@@ -273,11 +273,52 @@ def try_form(site_dir: Path, limits: TryLimits, url: str = "") -> str:
     return form.replace('value=""', f'value="{html.escape(url, quote=True)}"', 1)
 
 
+# The "Get a free key" button (site/key-form.html) goes where a page has this marker.
+KEY_FORM_MARK = "<!--key-form-->"
+
+NOINDEX_META = '<meta name="robots" content="noindex">'
+
+
+def key_form(site_dir: Path, free_quota: int | None, ref: str = "") -> str:
+    """The key button: a plain form that posts to /keys (keypages.py), with the free plan's quota filled in.
+
+    ``free_quota`` is None where a visitor cannot make a key (self-serve keys are off); then
+    there is no button. ``ref`` is the source tag the form sends; on a page served from memory
+    it is empty, and the layout's script fills it from the page's own ``?ref=``.
+    """
+    if not free_quota:
+        return ""
+    form = (site_dir / "key-form.html").read_text(encoding="utf-8").replace("FREE_QUOTA", f"{free_quota:,}")
+    return form.replace('value=""', f'value="{html.escape(ref, quote=True)}"', 1)
+
+
+def wants_html(request: Request) -> bool:
+    """Whether a request comes from a browser showing a page, not from a program.
+
+    A browser's navigation names ``text/html`` in ``Accept``. API clients send ``*/*`` or
+    ``application/json``, and MCP clients ``text/event-stream``; a client that names an event
+    stream is never taken for a browser, whatever else it lists.
+    """
+    accept = ",".join(request.headers.getlist("accept")).lower()
+    return "text/html" in accept and "text/event-stream" not in accept
+
+
+def posted_from_another_site(request: Request) -> bool:
+    """Whether a form was posted from another site's page (``Sec-Fetch-Site: cross-site``).
+
+    The site's own forms (the try box, the key button) refuse those, so no other page can
+    spend its visitors' tries or key slots. A client that sends no such header is let through.
+    """
+    return request.headers.get("sec-fetch-site", "").lower() == "cross-site"
+
+
 def render_document(
     site_dir: Path, *, path: str, title: str, description: str, content: str,
-    current: Page | None = None, draft: bool = False,
+    current: Page | None = None, draft: bool = False, noindex: bool = False,
 ) -> RenderedPage:
-    """Wrap ``content`` in the shared layout and compute its Content-Security-Policy."""
+    """Wrap ``content`` in the shared layout and compute its Content-Security-Policy.
+
+    ``noindex`` adds a robots meta tag, for pages that are answers to one request."""
     layout = (site_dir / "layout.html").read_text(encoding="utf-8")
     banner = f'<p class="draft-banner" role="note">{html.escape(DRAFT_BANNER)}</p>' if draft else ""
     fields = {
@@ -286,6 +327,7 @@ def render_document(
         "canonical": html.escape(canonical_url(path)),
         "nav": _nav(current),
         "draft_banner": banner,
+        "robots": NOINDEX_META if noindex else "",
     }
     document = layout
     for name, value in fields.items():
@@ -298,11 +340,13 @@ def render_document(
 
 
 def render_page(
-    page: Page, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False
+    page: Page, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False,
+    free_quota: int | None = None,
 ) -> RenderedPage:
     content = sale_text((site_dir / "pages" / page.source).read_text(encoding="utf-8"), paid_open)
     content = oauth_text(content, oauth_on)
     content = content.replace(TRY_FORM_MARK, try_form(site_dir, tries))
+    content = content.replace(KEY_FORM_MARK, key_form(site_dir, free_quota))
     return render_document(
         site_dir, path=page.path, title=page.title, description=page.description, content=content,
         current=page, draft=page.draft,
@@ -332,14 +376,17 @@ def llms_txt(site_dir: Path, paid_open: bool = True, oauth_on: bool = False) -> 
 
 
 def add_site_routes(
-    app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False
+    app: FastAPI, site_dir: Path, paid_open: bool = True, tries: TryLimits = TryLimits(), oauth_on: bool = False,
+    free_quota: int | None = None,
 ) -> None:
     """Serve every page in ``PAGES``, plus /robots.txt, /sitemap.xml and /llms.txt (GET and HEAD).
 
     ``paid_open`` is whether this server sells paid plans (Stripe is set up); it picks the
     sale or no-sale text in each page. ``tries`` are the limits the home page's try box states.
-    ``oauth_on`` is whether OAuth sign-in on /mcp is on; it picks the oauth or no-oauth text."""
-    rendered = {page.path: render_page(page, site_dir, paid_open, tries, oauth_on) for page in PAGES}
+    ``oauth_on`` is whether OAuth sign-in on /mcp is on; it picks the oauth or no-oauth text.
+    ``free_quota`` is the free plan's monthly quota where a visitor can make a key, for the
+    "Get a free key" button (``key_form``); None leaves the button out."""
+    rendered = {page.path: render_page(page, site_dir, paid_open, tries, oauth_on, free_quota) for page in PAGES}
 
     def page_endpoint(path: str):
         page = rendered[path]

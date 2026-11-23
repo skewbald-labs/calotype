@@ -74,6 +74,11 @@ def bearer(key: str) -> dict:
         ("POST", "/v1/keys", 201, False, set(), ["key_made"]),
         ("POST", "/v1/keys", 429, False, set(), ["key_refused"]),
         ("POST", "/v1/keys", 400, False, set(), ["key_refused"]),
+        # The site's key button and the help pages are marked by their handlers, not seen here.
+        ("POST", "/keys", 200, False, set(), []),
+        ("POST", "/keys", 429, False, set(), []),
+        ("GET", "/keys", 200, False, set(), []),  # the button's page exists, so it is no longer a miss
+        ("GET", "/mcp", 405, False, set(), []),
         ("GET", "/", 200, False, set(), []),
         ("GET", "/v1/screenshot", 200, True, set(), []),
         ("POST", "/mcp", 0, False, {"initialize"}, []),  # the app raised before answering
@@ -86,6 +91,8 @@ def test_classify(method, path, status, key_sent, methods, expected):
 def test_every_step_classify_returns_is_a_stored_step():
     assert set(FUNNEL_EVENTS) >= {"looked", "tool_no_key", "bad_key", "oauth_probe", "key_miss", "key_made",
                                   "key_refused", "first_capture"}
+    # The steps a handler marks (keypages.py) are stored steps too, or the middleware would drop them.
+    assert set(FUNNEL_EVENTS) >= {"api_page", "web_key"}
 
 
 # --- through the app ------------------------------------------------------------------------

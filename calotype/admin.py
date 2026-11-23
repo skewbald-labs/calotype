@@ -44,8 +44,10 @@ they ended. The counts are all there is: no URL, host or IP address is stored.
 
 ``funnel`` prints the daily funnel counts (``funnel.py``), newest day first,
 with a total row: agents that looked at the MCP tool or called it without a
-key, wrong keys, OAuth probes, misses on key and sign-up paths, refused and
-made keys, and first screenshots. Counts only, like ``tries``.
+key, wrong keys, OAuth probes, misses on key and sign-up paths, help pages
+shown to browsers on API-only addresses (``api_page``), refused and made keys,
+keys made with the site's button (``web_key``, also in ``key_made``), and first
+screenshots. Counts only, like ``tries``.
 
 ``credits`` shows a key's prepaid credit and its purchases. ``refund-credit``
 undoes one purchase, named by its Stripe PaymentIntent id: it takes back the
