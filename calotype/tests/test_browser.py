@@ -54,6 +54,17 @@ def site(canary):
             "<script>const o=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting)e.target.classList.add('in')}),"
             "{threshold:0.1});document.querySelectorAll('.s').forEach(e=>o.observe(e));</script></body>"
         ),
+        # 4,000 px in five 800 px bands, each its own colour, and a band at 800-1600 that is
+        # transparent until it scrolls into view (as /reveal), over a white page.
+        "/bands": html(
+            "<!doctype html><style>body{margin:0;background:#fff}div{height:800px}"
+            ".r{opacity:0;transition:opacity 2s}.r.in{opacity:1}</style><body>"
+            "<div style='background:#f00'></div><div class='r' style='background:#00f'></div>"
+            "<div style='background:#0f0'></div><div style='background:#ff0'></div><div style='background:#0ff'></div>"
+            "<script>const o=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting)e.target.classList.add('in')}),"
+            "{threshold:0.1});document.querySelectorAll('.r').forEach(e=>o.observe(e));</script></body>"
+        ),
+        "/short": html("<!doctype html><body style='margin:0;background:#f0f'><div style='height:300px'></div></body>"),
         # A page that grows every time it is scrolled: the scroll pass must not run on.
         "/endless": html(
             "<!doctype html><body style='margin:0;background:#fff'><div style='height:1200px'></div>"
@@ -282,3 +293,77 @@ def test_a_full_page_capture_scrolls_through_first_so_revealed_sections_show(mak
     assert r.status_code == 200, r.text
     assert Image.open(io.BytesIO(r.content)).size[1] <= 20000
     assert int(r.headers["x-calotype-duration-ms"]) < 20000
+
+
+def _pixels(r, *points):
+    img = Image.open(io.BytesIO(r.content)).convert("RGB")
+    return img.size, [img.getpixel(p) for p in points]
+
+
+def test_scroll_y_captures_one_screen_further_down_with_its_revealed_section(make_client, site, free_key):
+    client = make_client()
+    shot = lambda **p: client.get(
+        "/v1/screenshot", params={"url": site.url("/bands"), "width": 400, "height": 800, **p}, headers=auth(free_key)
+    )
+    # The first screen is the red band.
+    r = shot()
+    assert r.status_code == 200, r.text
+    assert _pixels(r, (200, 400)) == ((400, 800), [(255, 0, 0)])
+    assert r.headers["x-calotype-scroll-y"] == "0" and r.headers["x-calotype-page-height"] == "4000"
+
+    # scroll_y=800 is the band at 800-1600: blue, and drawn, though it shows only once scrolled into view.
+    r = shot(scroll_y=800)
+    assert r.status_code == 200, r.text
+    assert _pixels(r, (200, 5), (200, 400), (200, 795)) == ((400, 800), [(0, 0, 255)] * 3)
+    assert r.headers["x-calotype-scroll-y"] == "800"
+
+    # Between bands: the screen's top is exactly at scroll_y.
+    r = shot(scroll_y=2000)
+    assert _pixels(r, (200, 300), (200, 500)) == ((400, 800), [(0, 255, 0), (255, 255, 0)])
+
+    # Past the end: the last full screen (4000 - 800), and the header says so.
+    r = shot(scroll_y=15000, format="jpeg")
+    assert r.status_code == 200, r.text
+    assert r.headers["x-calotype-scroll-y"] == "3200"
+    size, (px,) = _pixels(r, (200, 400))
+    assert size == (400, 800) and px[0] < 40 and px[1] > 215 and px[2] > 215  # cyan, through JPEG
+
+    # With full_page, refused before anything is captured or counted.
+    r = shot(scroll_y=800, full_page="true")
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_parameters"
+    assert "full_page" in r.json()["error"]["message"]
+    assert client.get("/v1/usage", headers=auth(free_key)).json()["used"] == 4
+
+
+def test_scroll_y_on_a_page_shorter_than_a_screen_captures_its_top(make_client, site, free_key):
+    client = make_client()
+    r = client.get(
+        "/v1/screenshot", params={"url": site.url("/short"), "width": 400, "height": 600, "scroll_y": 800},
+        headers=auth(free_key),
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["x-calotype-scroll-y"] == "0"
+    assert _pixels(r, (200, 100)) == ((400, 600), [(255, 0, 255)])
+
+
+def test_the_mcp_tool_text_follows_the_screens_of_a_real_page(make_client, site, free_key):
+    client = make_client()
+
+    from .test_remote_mcp import call, tool_result
+
+    def text(**args):
+        result = tool_result(call(client, free_key, {"url": site.url("/bands"), "width": 400, **args}))
+        assert result["isError"] is False, result
+        return result["content"][1]["text"]
+
+    first = text()
+    assert "This is screen 1 of about 5 (the top 800 px of a page about 4,000 px tall)." in first
+    assert "call again with scroll_y=800;" in first
+    middle = text(scroll_y=800)
+    assert "This is screen 2 of about 5 (y = 800 to 1,600 of about 4,000 px)." in middle
+    assert "call again with scroll_y=1600." in middle
+    last = text(scroll_y=9000)
+    assert "scroll_y=9000 is past the end of the page, so the last screen was captured instead." in last
+    assert "This is screen 5 of about 5 (y = 3,200 to 4,000 of about 4,000 px): the bottom of the page." in last
+    short = text(url=site.url("/short"))
+    assert "This is screen" not in short and "scroll_y" not in short

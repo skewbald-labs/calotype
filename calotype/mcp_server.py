@@ -38,10 +38,14 @@ async def screenshot(
     dark_mode: bool = False,
     block_ads: bool = True,
     delay_ms: int = 0,
+    scroll_y: int = 0,
 ) -> Image:
     """Capture a screenshot of a public http(s) web page.
 
-    Full-page captures of long pages can be large; jpeg or webp keeps them small.
+    The default is the first screen. scroll_y (CSS px, 0 to 20,000) captures one screen further
+    down at the same readable size; past the end, the last screen. It cannot be combined with
+    full_page. Full-page captures of long pages can be large and are scaled down by the model;
+    jpeg or webp keeps them small.
     """
     key = os.environ.get("CALOTYPE_API_KEY", "").strip()
     if not key:
@@ -57,6 +61,8 @@ async def screenshot(
         "block_ads": block_ads,
         "delay_ms": delay_ms,
     }
+    if scroll_y:
+        body["scroll_y"] = scroll_y
     # ToolError messages reach the model; other exceptions show only a generic error.
     try:
         async with _client() as client:

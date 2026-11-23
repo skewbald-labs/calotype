@@ -835,7 +835,7 @@ H8_SOURCES = {
     ),
 }
 # The arguments of the hosted MCP server's one tool (remote_mcp.py), a subset of the API's parameters.
-MCP_TOOL_ARGUMENTS = {"url", "full_page", "width", "height", "format", "dark_mode", "block_ads"}
+MCP_TOOL_ARGUMENTS = {"url", "full_page", "width", "height", "format", "dark_mode", "block_ads", "scroll_y"}
 
 
 def h8_ref_tag(path: str) -> str:
@@ -992,7 +992,7 @@ def test_playwright_page_covers_where_it_runs_and_uses_the_tools_own_arguments(s
     named = {name for cell in calotype_cells for name in re.findall(r"<code>([a-z_]+)</code>", cell)}
     assert MCP_TOOL_ARGUMENTS <= named | {"block_ads"} and named <= set(params.ScreenshotParams.model_fields) | {
         "screenshot", "jpeg", "png", "webp"}
-    assert f"One tool with {['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'][len(MCP_TOOL_ARGUMENTS)]} arguments" in doc
+    assert f"One tool with {['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'][len(MCP_TOOL_ARGUMENTS)]} arguments" in doc
     assert re.search(r"cal_[A-Za-z0-9]{8,}", doc) is None and "cal_your_key" in doc
 
 

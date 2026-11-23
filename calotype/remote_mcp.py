@@ -80,7 +80,7 @@ from starlette.types import Receive, Scope, Send
 
 from . import __version__
 from .logs import MCP_CLIENT_MAX, MCP_CLIENT_VERSION_MAX, clean_name
-from .params import MAX_HEIGHT, MAX_WIDTH, MIN_SIDE
+from .params import MAX_FULL_PAGE_HEIGHT, MAX_HEIGHT, MAX_WIDTH, MIN_SIDE
 
 log = logging.getLogger("calotype.mcp")
 
@@ -111,7 +111,8 @@ INSTRUCTIONS = (
 TOOL_DESCRIPTION = (
     "Take a screenshot of a public web page and return it as an image. "
     "By default the image is the first screen only (the viewport, 1280x800); the result says how tall the "
-    "whole page is, and full_page=true captures all of it. "
+    "whole page is and which scroll_y shows the next screen. scroll_y captures one screen further down at "
+    "readable size; full_page=true captures all of it in one (smaller) image. "
     "Use it to see what a page looks like: its layout, text, charts or errors as rendered in Chromium. "
     "Only public http(s) pages; private and local addresses are refused. "
     "Each successful call counts as one screenshot against the key's monthly quota; failed ones do not. "
@@ -209,6 +210,17 @@ class RemoteMCP:
         ] = "jpeg",
         dark_mode: Annotated[bool, Field(description="Ask the page for its dark colour scheme.")] = False,
         block_ads: Annotated[bool, Field(description="Block requests to common ad and tracking domains.")] = True,
+        scroll_y: Annotated[
+            int,
+            Field(
+                ge=0,
+                le=MAX_FULL_PAGE_HEIGHT,
+                description="Capture one screen further down the page, at the same readable size: the y, in CSS "
+                "pixels, of the screen's top (0 is the first screen; the result gives the next one's). The page is "
+                "scrolled there first, so sections that appear on scroll are shown. Past the end, the last screen "
+                "is captured. Not with full_page.",
+            ),
+        ] = 0,
     ) -> list[ImageContent | TextContent]:
         request = ctx.request_context.request
         state = getattr(request, "state", None)
@@ -223,6 +235,7 @@ class RemoteMCP:
             "format": format,
             "dark_mode": dark_mode,
             "block_ads": block_ads,
+            "scroll_y": scroll_y,
         }
         try:
             shot = await self._capture(request, key, data)
@@ -432,33 +445,67 @@ def _summary(shot: Any) -> str:
         text += f" The page answered HTTP {result.target_status}."
     if result.truncated:
         text += " The page passed the 50 MB download limit; the image shows what had loaded by then."
-    text += below_the_fold(params, (result.meta or {}).get("page_height"))
+    meta = result.meta or {}
+    text += below_the_fold(params, meta.get("page_height"), meta.get("scroll_y"))
     text += f" This key has used {shot.used} of {shot.limit} screenshots this month."
     if getattr(shot, "upgrade", ""):
         text += " " + shot.upgrade
     return text
 
 
-def below_the_fold(params: Any, page_height: int | None) -> str:
-    """One sentence for the agent when the image is not the whole page, else ''.
+def below_the_fold(params: Any, page_height: int | None, scroll_y: int | None = None) -> str:
+    """For the agent: which part of the page the image is, and how to see the next part; else ''.
 
     A default capture is the first screen only. Without this an agent cannot tell a short page
     from the top of a very long one, and reports on a fraction of the page as if it were all of it.
+    A full-page image of a long page is scaled down until its text cannot be read, so the next step
+    offered is the next screen (``scroll_y``) at readable size. ``scroll_y`` is the y the capture
+    used, which is less than ``params.scroll_y`` when that was past the last screen.
     """
-    if not page_height:
-        return ""
     if params.full_page:
+        if not page_height:
+            return ""
         cap = params.full_page_height_cap()
         if page_height > cap:
             return f" The page is about {page_height:,} px tall; a full-page capture stops at {cap:,} px, so the rest is not shown."
         return ""
-    if page_height <= params.height * 1.25:
+    view, asked = params.height, params.scroll_y
+    y = asked if scroll_y is None else scroll_y
+    if not page_height:
+        return f" This is the screen from y = {y:,} to {y + view:,} px of the page." if y else ""
+    clamped = y < asked
+    if not clamped and y == 0 and page_height <= view * 1.25:
         return ""
-    screens = -(-page_height // params.height)
-    return (
-        f" This is only the first screen: the top {params.height:,} px of a page about {page_height:,} px tall"
-        f" (about {screens} screens). To see the rest, call again with full_page=true."
-    )
+    if clamped and y == 0:
+        if page_height > view * 1.25:
+            # Taller than a screen, yet the window would not scroll: the page scrolls inside an element.
+            return (
+                f" The page would not scroll to scroll_y={asked} (it may scroll inside an element),"
+                " so this is its first screen."
+            )
+        return (
+            f" The page is about {page_height:,} px tall and fits in one screen, so scroll_y={asked} was moved to 0:"
+            " this is the whole page."
+        )
+    screens = max(1, -(-page_height // view))
+    at_end = y + view >= page_height
+    n = screens if at_end else min(screens, y // view + 1)
+    text = f" scroll_y={asked} is past the end of the page, so the last screen was captured instead." if clamped else ""
+    if y == 0:
+        text += f" This is screen 1 of about {screens} (the top {view:,} px of a page about {page_height:,} px tall)."
+    else:
+        where = f"y = {y:,} to {min(y + view, page_height):,} of about {page_height:,} px"
+        text += f" This is screen {n} of about {screens} ({where})" + (": the bottom of the page." if at_end else ".")
+    if not at_end:
+        following = min(y + view, page_height - view)
+        if y == 0:
+            text += (
+                f" To see the next screen at readable size, call again with scroll_y={following};"
+                " full_page=true captures the whole page in one (smaller) image."
+            )
+        else:
+            text += f" For the next screen, call again with scroll_y={following}."
+    return text
 
 
 def _dimensions(image: bytes) -> tuple[int, int] | None:

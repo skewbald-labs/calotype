@@ -46,7 +46,7 @@
     <li><strong>Method:</strong> <code>GET</code></li>
     <li><strong>URL:</strong> <code><span class="origin">https://calotype.dev</span>/v1/screenshot</code></li>
     <li><strong>Authentication:</strong> Generic Credential Type, then Header Auth, with a new credential: a header named <code>Authorization</code> whose value is <code>Bearer cal_your_key</code>. n8n's credentials page also lists a Bearer Auth type, which holds the key alone.</li>
-    <li><strong>Send Query Parameters:</strong> on. Add <code>url</code> with the page's address, and any others you need: <code>width</code>, <code>height</code>, <code>full_page</code>, <code>format</code>, <code>dark_mode</code>, <code>block_ads</code>. The whole list is in the <a href="/docs#parameters">API reference</a>.</li>
+    <li><strong>Send Query Parameters:</strong> on. Add <code>url</code> with the page's address, and any others you need: <code>width</code>, <code>height</code>, <code>full_page</code>, <code>format</code>, <code>dark_mode</code>, <code>block_ads</code>, <code>scroll_y</code>. The whole list is in the <a href="/docs#parameters">API reference</a>.</li>
     <li><strong>Options &gt; Response &gt; Response Format:</strong> File. In <strong>Put Output in Field</strong>, enter a name such as <code>data</code>.</li>
   </ul>
   <p>The answer to a successful call is the image itself, not JSON, which is why the response format matters. n8n's documentation describes the File format as putting the response into a file in the field you name. The next node can then use that binary field: attach it to an email or a chat message, upload it to storage, or pass it to a model that reads images.</p>

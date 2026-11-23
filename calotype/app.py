@@ -417,6 +417,7 @@ def create_app(
             target=target.display,
             format=params.format,
             full_page=params.full_page,
+            scroll_y=params.scroll_y,
             bytes=len(result.image),
             duration_ms=result.duration_ms,
             target_status=result.target_status,
@@ -476,6 +477,10 @@ def create_app(
         if (result.meta or {}).get("page_height"):
             # The whole scrolling page in CSS pixels, so a caller can tell a first screen from a whole page.
             headers["X-Calotype-Page-Height"] = str(result.meta["page_height"])
+        if (result.meta or {}).get("scroll_y") is not None:
+            # For a one-screen capture: the y of the screen's top in the page, as captured. A scroll_y
+            # past the last screen is moved up to it, so this can be less than was asked.
+            headers["X-Calotype-Scroll-Y"] = str(result.meta["scroll_y"])
         if result.truncated:
             headers["X-Calotype-Truncated"] = "1"
         if shot.credits is not None:

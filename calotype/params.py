@@ -29,6 +29,9 @@ class ScreenshotParams(BaseModel):
     width: int = Field(1280, ge=MIN_SIDE, le=MAX_WIDTH)
     height: int = Field(800, ge=MIN_SIDE, le=MAX_HEIGHT)
     full_page: bool = False
+    # The top of the one screen to capture, in CSS pixels from the top of the page.
+    # Past the last screen it is moved up to the last screen (Renderer._scroll_to).
+    scroll_y: int = Field(0, ge=0, le=MAX_FULL_PAGE_HEIGHT)
     format: Format = "png"
     quality: int | None = Field(None, ge=1, le=100)
     device_scale_factor: float = Field(1.0, ge=1.0, le=3.0)
@@ -53,6 +56,8 @@ class ScreenshotParams(BaseModel):
         """Cross-field rules. Returns a message, or None if fine."""
         if self.quality is not None and self.format == "png":
             return "quality applies only to jpeg and webp."
+        if self.scroll_y and self.full_page:
+            return "scroll_y picks one screen of the page, so it cannot be used with full_page=true. Send one or the other."
         pixels = self.width * self.height * self.device_scale_factor**2
         if pixels > MAX_OUTPUT_PIXELS:
             return "width x height x device_scale_factor^2 is too large."

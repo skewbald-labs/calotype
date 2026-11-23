@@ -75,3 +75,20 @@ def test_mcp_server_lists_tool():
     tools = asyncio.run(mcp_server.server.list_tools())
     names = [t.name for t in tools]
     assert names == ["screenshot"]
+
+
+def test_mcp_tool_sends_scroll_y_only_when_set(monkeypatch):
+    import json
+
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.read()))
+        return httpx.Response(200, content=PNG_1X1, headers={"content-type": "image/png"})
+
+    monkeypatch.setenv("CALOTYPE_API_KEY", "cal_test")
+    monkeypatch.setattr(mcp_server, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    asyncio.run(mcp_server.screenshot("https://example.com", scroll_y=1600))
+    asyncio.run(mcp_server.screenshot("https://example.com"))
+    assert bodies[0]["scroll_y"] == 1600
+    assert "scroll_y" not in bodies[1]  # an older API, which refuses unknown parameters, still works

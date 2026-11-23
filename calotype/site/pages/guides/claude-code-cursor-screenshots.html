@@ -102,7 +102,7 @@ claude mcp add --transport http calotype "<span class="origin">https://calotype.
 
   <h2 id="tips">Getting useful images</h2>
   <ul>
-    <li><strong>Prefer the viewport to the full page.</strong> The tool's default is 1280 by 800. With <code>full_page: true</code> a long page becomes a very tall image, and a tall image that is scaled down to fit a model's limits has small text. Ask for the full page when you care about layout, not when the agent must read the words.</li>
+    <li><strong>Prefer the viewport to the full page.</strong> The tool's default is 1280 by 800. With <code>full_page: true</code> a long page becomes a very tall image, and a tall image that is scaled down to fit a model's limits has small text. Ask for the full page when you care about layout, not when the agent must read the words. To read further down, use <code>scroll_y</code>: the text with each screen gives the value for the next one.</li>
     <li><strong>Set the width to the layout you are testing.</strong> <code>width: 390</code> shows a phone layout; the default shows a laptop.</li>
     <li><strong>Say <code>dark_mode: true</code></strong> when the question is about dark mode. It sets <code>prefers-color-scheme: dark</code>; a site that uses only its own theme switch may ignore it.</li>
     <li><strong>Let the agent read the errors.</strong> A refused address, a page that fails to load or a used-up quota comes back as a tool error that starts with a code, such as <code>blocked_target</code> or <code>quota_exceeded</code>. Only captures that return an image count against the quota.</li>

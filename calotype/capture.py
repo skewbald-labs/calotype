@@ -81,6 +81,28 @@ _SCROLL_THROUGH_JS = """async ({step, pause, maxY, budget}) => {
   window.scrollTo(0, 0);
   await sleep(pause);
 }"""
+# The scroll to one screen of the page (Renderer._scroll_to). With walk, it steps down a screen
+# at a time first, as the full-page pass does, so sections above the target mount and take their
+# height before the target is reached. A target past the last screen stops at the last screen
+# (the page's height less the viewport's), as the browser itself would. Returns the y it used.
+_SCROLL_TO_JS = """async ({target, step, pause, budget, walk}) => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const height = () => Math.max(document.documentElement ? document.documentElement.scrollHeight : 0,
+                                document.body ? document.body.scrollHeight : 0);
+  const want = () => Math.max(0, Math.min(target, height() - window.innerHeight));
+  const end = performance.now() + budget;
+  if (walk) {
+    for (let y = step; y < want() && performance.now() < end; y += step) {
+      window.scrollTo(0, y);
+      await sleep(pause);
+    }
+  }
+  if (Math.abs(window.scrollY - want()) >= 1) {
+    window.scrollTo(0, want());
+    await sleep(pause);
+  }
+  return Math.round(window.scrollY);
+}"""
 
 
 def load_blocklist(path: Path) -> frozenset[str]:
@@ -180,9 +202,10 @@ class Renderer:
                 viewport={"width": params.width, "height": params.height},
                 device_scale_factor=params.device_scale_factor,
                 color_scheme="dark" if params.dark_mode else "light",
-                # A full-page capture asks the page for reduced motion: sections that fade or
-                # slide in on scroll are then shown at rest instead of caught mid-way or hidden.
-                reduced_motion="reduce" if params.full_page else "no-preference",
+                # A full-page capture, or one screen further down, asks the page for reduced motion:
+                # sections that fade or slide in on scroll are then shown at rest instead of caught
+                # mid-way or hidden.
+                reduced_motion="reduce" if params.full_page or params.scroll_y else "no-preference",
                 proxy={"server": session.proxy_url, "bypass": "<-loopback>"},
                 service_workers="block",
                 accept_downloads=False,
@@ -258,9 +281,14 @@ class Renderer:
             if params.delay_ms:
                 await asyncio.sleep(params.delay_ms / 1000)
 
+            scroll_y = None
             if params.full_page:
                 await self._scroll_through(page, params, deadline)
+            elif params.scroll_y:
+                scroll_y = await self._scroll_to(page, params, deadline)
             page_height = await self._page_height(page)
+            if not params.full_page and scroll_y is None:
+                scroll_y = await self._scroll_position(page)
             image = await self._screenshot(page, params, page_height)
             return CaptureResult(
                 image=image,
@@ -271,7 +299,9 @@ class Renderer:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 # page_height: the whole scrolling page in CSS pixels (None if it could not be
                 # read), so a caller that asked for the first screen can tell how much is below it.
-                meta={"egress_bytes": session.bytes_in, "page_height": page_height},
+                # scroll_y: for a one-screen capture, the y of the screen's top in the page as
+                # captured (a scroll_y past the last screen is moved up to it; None if unknown).
+                meta={"egress_bytes": session.bytes_in, "page_height": page_height, "scroll_y": scroll_y},
                 final_url=page.url,
             )
         finally:
@@ -340,6 +370,42 @@ class Renderer:
                     pass
         except (PlaywrightError, asyncio.TimeoutError):
             pass
+
+    async def _scroll_to(self, page, params: ScreenshotParams, deadline: float) -> int | None:
+        """Scroll the window so the screen's top is at ``params.scroll_y``; return the y reached.
+
+        Steps down a screen at a time first, inside the same bounds as the full-page pass, so
+        sections that mount or reveal on scroll are drawn; then waits briefly for lazy images in
+        view and scrolls again in case they moved the page. A y past the last screen stops at
+        the last screen. Best effort: a page that breaks the script is captured where it stands.
+        """
+        left = deadline - time.monotonic() - SCROLL_RESERVE_S
+        args = {
+            "target": params.scroll_y,
+            "step": params.height,
+            "pause": SCROLL_PAUSE_MS,
+            "budget": int(max(0.0, min(SCROLL_BUDGET_S, left)) * 1000),
+            "walk": left > 0.5,
+        }
+        try:
+            await page.evaluate(_SCROLL_TO_JS, args)
+            idle_ms = int(min(SCROLL_IDLE_S, max(0.0, deadline - time.monotonic() - SCROLL_RESERVE_S)) * 1000)
+            if idle_ms > 0:
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=idle_ms)  # lazy images
+                except (PlaywrightError, asyncio.TimeoutError):
+                    pass
+            y = await page.evaluate(_SCROLL_TO_JS, {**args, "walk": False})
+            return int(y)
+        except (PlaywrightError, asyncio.TimeoutError, TypeError, ValueError):
+            return await self._scroll_position(page)
+
+    async def _scroll_position(self, page) -> int | None:
+        """How far down the window is scrolled, in CSS pixels, or None when the page will not say."""
+        try:
+            return int(round(await page.evaluate("() => window.scrollY")))
+        except (PlaywrightError, asyncio.TimeoutError, TypeError, ValueError):
+            return None
 
     async def _page_height(self, page) -> int | None:
         """The height of the whole scrolling page in CSS pixels, or None when the page will not say."""

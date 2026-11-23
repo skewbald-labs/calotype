@@ -114,6 +114,10 @@ def test_keys_are_stored_hashed(store):
         {"url": "https://example.com", "wait_until": "forever"},
         {"url": "https://example.com", "full_page": "maybe"},
         {"url": "https://example.com", "unknown_option": "1"},
+        {"url": "https://example.com", "scroll_y": -1},
+        {"url": "https://example.com", "scroll_y": 20001},
+        {"url": "https://example.com", "scroll_y": "down"},
+        {"url": "https://example.com", "scroll_y": 800, "full_page": "true"},
     ],
 )
 def test_invalid_parameters(client, free_key, params, fake_renderer):
@@ -178,6 +182,58 @@ def test_valid_options_reach_renderer(client, free_key, fake_renderer):
     p = fake_renderer.calls[0]
     assert (p.width, p.height, p.format, p.quality, p.device_scale_factor) == (3840, 2160, "jpeg", 55, 2.0)
     assert p.block_ads and p.dark_mode and not p.full_page and p.wait_until == "networkidle"
+
+
+def test_scroll_y_reaches_the_renderer_and_its_header_says_where_the_screen_is(settings, store, free_key):
+    from dataclasses import replace
+
+    from fastapi.testclient import TestClient
+
+    from calotype.app import create_app
+    from calotype.ssrf import AddressPolicy
+
+    from .conftest import FakeRenderer, fake_resolver
+
+    class Scrolled(FakeRenderer):
+        async def capture(self, params):
+            result = await super().capture(params)
+            # As the real renderer does: a scroll_y past the last screen is moved up to it.
+            return replace(result, meta={"page_height": 3000, "scroll_y": min(params.scroll_y, 3000 - params.height)})
+
+    renderer = Scrolled()
+    app = create_app(settings, policy=AddressPolicy(resolver=fake_resolver), storage=store, renderer=renderer)
+    with TestClient(app) as c:
+        r = c.get("/v1/screenshot", params={"url": "https://example.com", "scroll_y": "800"}, headers=auth(free_key))
+        assert r.status_code == 200, r.text
+        assert renderer.calls[-1].scroll_y == 800 and not renderer.calls[-1].full_page
+        assert (r.headers["x-calotype-scroll-y"], r.headers["x-calotype-page-height"]) == ("800", "3000")
+        r = c.post("/v1/screenshot", json={"url": "https://example.com", "scroll_y": 9000}, headers=auth(free_key))
+        assert r.status_code == 200 and r.headers["x-calotype-scroll-y"] == "2200"
+        # scroll_y=0 with full_page is the default, not a conflict.
+        r = c.post("/v1/screenshot", json={"url": "https://example.com", "scroll_y": 0, "full_page": True},
+                   headers=auth(free_key))
+        assert r.status_code == 200, r.text
+
+
+def test_scroll_y_with_full_page_is_refused_in_plain_words(client, free_key, fake_renderer, store):
+    r = client.post(
+        "/v1/screenshot", json={"url": "https://example.com", "scroll_y": 800, "full_page": True}, headers=auth(free_key)
+    )
+    assert r.status_code == 400
+    error = r.json()["error"]
+    assert error["code"] == "invalid_parameters"
+    assert "scroll_y" in error["message"] and "full_page=true" in error["message"]
+    assert fake_renderer.calls == []
+    assert store.get_usage(store.get_key(free_key).id, current_month()) == 0
+
+
+def test_scroll_y_params():
+    from calotype.params import MAX_FULL_PAGE_HEIGHT, ScreenshotParams
+
+    assert ScreenshotParams(url="https://x.example").scroll_y == 0
+    assert ScreenshotParams(url="https://x.example", scroll_y=MAX_FULL_PAGE_HEIGHT).check_combinations() is None
+    assert ScreenshotParams(url="https://x.example", scroll_y=0, full_page=True).check_combinations() is None
+    assert "full_page" in ScreenshotParams(url="https://x.example", scroll_y=1, full_page=True).check_combinations()
 
 
 # --- quota ------------------------------------------------------------------

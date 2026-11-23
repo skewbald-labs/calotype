@@ -125,7 +125,8 @@ def test_tools_list(client, free_key):
     schema = tool["inputSchema"]
     assert schema["required"] == ["url"]
     props = schema["properties"]
-    assert set(props) == {"url", "full_page", "width", "height", "format", "dark_mode", "block_ads"}
+    assert set(props) == {"url", "full_page", "width", "height", "format", "dark_mode", "block_ads", "scroll_y"}
+    assert (props["scroll_y"]["minimum"], props["scroll_y"]["maximum"], props["scroll_y"]["default"]) == (0, 20000, 0)
     assert (props["width"]["minimum"], props["width"]["maximum"]) == (100, 3840)
     assert (props["height"]["minimum"], props["height"]["maximum"]) == (100, 2160)
     assert props["url"]["maxLength"] == 2048
@@ -531,12 +532,50 @@ def _params(**kw):
     return ScreenshotParams(url="https://example.com", **kw)
 
 
-def test_a_first_screen_of_a_long_page_says_so():
+def test_a_first_screen_of_a_long_page_says_so_and_gives_the_next_scroll_y():
     from calotype.remote_mcp import below_the_fold
 
-    text = below_the_fold(_params(), 14200)
-    assert "only the first screen" in text and "top 800 px" in text and "14,200 px tall" in text
-    assert "about 18 screens" in text and "full_page=true" in text
+    assert below_the_fold(_params(), 5427) == below_the_fold(_params(), 5427, 0) == (
+        " This is screen 1 of about 7 (the top 800 px of a page about 5,427 px tall)."
+        " To see the next screen at readable size, call again with scroll_y=800;"
+        " full_page=true captures the whole page in one (smaller) image."
+    )
+    text = below_the_fold(_params(height=600), 14200)
+    assert "screen 1 of about 24" in text and "top 600 px" in text and "14,200 px tall" in text
+    assert "scroll_y=600" in text
+
+
+def test_a_middle_screen_says_where_it_is_and_which_scroll_y_comes_next():
+    from calotype.remote_mcp import below_the_fold
+
+    assert below_the_fold(_params(scroll_y=800), 5427, 800) == (
+        " This is screen 2 of about 7 (y = 800 to 1,600 of about 5,427 px). For the next screen, call again with scroll_y=1600."
+    )
+    # The next screen never runs past the end: it is the last full screen.
+    assert below_the_fold(_params(scroll_y=4000), 5427, 4000).endswith("call again with scroll_y=4627.")
+
+
+def test_the_last_screen_says_it_is_the_bottom_and_a_clamped_one_says_so():
+    from calotype.remote_mcp import below_the_fold
+
+    last = below_the_fold(_params(scroll_y=4627), 5427, 4627)
+    assert last == " This is screen 7 of about 7 (y = 4,627 to 5,427 of about 5,427 px): the bottom of the page."
+    assert "scroll_y=" not in last
+    assert below_the_fold(_params(scroll_y=9000), 5427, 4627) == (
+        " scroll_y=9000 is past the end of the page, so the last screen was captured instead." + last
+    )
+
+
+def test_scroll_y_on_a_short_page_says_the_page_fits():
+    from calotype.remote_mcp import below_the_fold
+
+    assert below_the_fold(_params(scroll_y=800), 600, 0) == (
+        " The page is about 600 px tall and fits in one screen, so scroll_y=800 was moved to 0: this is the whole page."
+    )
+    # A page that will not scroll the window (it scrolls inside an element) is not called short.
+    assert "would not scroll" in below_the_fold(_params(scroll_y=800), 5000, 0)
+    # A page whose height is unknown still says where the screen is.
+    assert below_the_fold(_params(scroll_y=800), None) == " This is the screen from y = 800 to 1,600 px of the page."
 
 
 @pytest.mark.parametrize("height", [None, 0, 800, 1000])
@@ -560,3 +599,26 @@ def test_the_tool_description_says_the_default_is_the_first_screen():
     from calotype.remote_mcp import TOOL_DESCRIPTION
 
     assert "first screen only" in TOOL_DESCRIPTION and "full_page=true" in TOOL_DESCRIPTION
+    assert "scroll_y" in TOOL_DESCRIPTION
+
+
+def test_tools_call_passes_scroll_y_and_the_text_gives_the_next_screen(settings, store, free_key):
+    class Scrolled(FakeRenderer):
+        async def capture(self, params):
+            result = await super().capture(params)
+            return replace(result, meta={"page_height": 5427, "scroll_y": min(params.scroll_y, 5427 - params.height)})
+
+    renderer = Scrolled()
+    app = create_app(settings, policy=AddressPolicy(resolver=fake_resolver), storage=store, renderer=renderer)
+    with TestClient(app) as c:
+        first = tool_result(call(c, free_key, {"url": "https://example.com"}))["content"][1]["text"]
+        middle = tool_result(call(c, free_key, {"url": "https://example.com", "scroll_y": 800}))["content"][1]["text"]
+        past = tool_result(call(c, free_key, {"url": "https://example.com", "scroll_y": 20000}))["content"][1]["text"]
+        both = tool_result(call(c, free_key, {"url": "https://example.com", "scroll_y": 800, "full_page": True}))
+        over = tool_result(call(c, free_key, {"url": "https://example.com", "scroll_y": 20001}))
+    assert [p.scroll_y for p in renderer.calls] == [0, 800, 20000]
+    assert "screen 1 of about 7" in first and "call again with scroll_y=800" in first
+    assert "screen 2 of about 7 (y = 800 to 1,600 of about 5,427 px)" in middle and "scroll_y=1600" in middle
+    assert "past the end of the page" in past and "screen 7 of about 7" in past
+    assert both["isError"] is True and "full_page=true" in both["content"][0]["text"]
+    assert over["isError"] is True

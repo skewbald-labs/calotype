@@ -134,7 +134,7 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
 
   <h2 id="tool">What the tool does</h2>
   <ul>
-    <li><strong>Inputs.</strong> <code>url</code>, plus optional <code>full_page</code>, <code>width</code>, <code>height</code>, <code>format</code>, <code>dark_mode</code> and <code>block_ads</code>. The tool returns JPEG with ads blocked unless asked otherwise, which keeps images small for a model.</li>
+    <li><strong>Inputs.</strong> <code>url</code>, plus optional <code>full_page</code>, <code>width</code>, <code>height</code>, <code>format</code>, <code>dark_mode</code>, <code>block_ads</code> and <code>scroll_y</code>. For a long page, the text that comes with the first screen gives the <code>scroll_y</code> of the next one, so an agent can read the page a screen at a time instead of in one shrunken full-page image. The tool returns JPEG with ads blocked unless asked otherwise, which keeps images small for a model.</li>
     <li><strong>Output.</strong> The image, and one line of text: the final address after redirects, the image size, and this month's count for the key.</li>
     <li><strong>Read-only.</strong> One look at one page: no clicking, typing or scrolling, and nothing is changed anywhere.</li>
     <li><strong>Public pages only.</strong> Private, loopback and cloud-metadata addresses are refused on every request, redirect and sub-request, so the tool cannot be turned on your own network. It cannot see <code>localhost</code>; for a local dev server, use a browser on your machine, such as Playwright MCP.</li>

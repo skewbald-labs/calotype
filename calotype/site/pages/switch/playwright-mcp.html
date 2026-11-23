@@ -65,7 +65,8 @@
       <tr><td><code>browser_resize</code> with <code>width</code> and <code>height</code></td><td><code>width</code> (default 1280) and <code>height</code> (default 800)</td><td>Arguments of the same call</td></tr>
       <tr><td><code>fullPage</code></td><td><code>full_page</code></td><td>Rename</td></tr>
       <tr><td><code>type</code> (png unless set or inferred from the file name)</td><td><code>format</code>: <code>jpeg</code> (the tool's default), <code>png</code>, <code>webp</code></td><td>Rename; the default differs</td></tr>
-      <tr><td><code>target</code> (one element)</td><td>none</td><td>Calotype captures the viewport or the full page only</td></tr>
+      <tr><td>Scrolling the page in a step of its own before the screenshot</td><td><code>scroll_y</code>: the y of the screen's top</td><td>One call; past the end, the last screen</td></tr>
+      <tr><td><code>target</code> (one element)</td><td>none</td><td>Calotype captures the viewport, one screen further down (<code>scroll_y</code>), or the full page; never one element</td></tr>
       <tr><td><code>filename</code> (saved in the workspace)</td><td>none</td><td>Calotype returns the image in the tool result; saving it is up to the client</td></tr>
       <tr><td><code>scale</code> (<code>css</code> or <code>device</code>)</td><td>none in the tool; <code>device_scale_factor</code> in the HTTP API</td><td></td></tr>
       <tr><td>Not an argument of the screenshot tool</td><td><code>dark_mode</code>, <code>block_ads</code> (on by default in the tool)</td><td>New on the Calotype side</td></tr>
@@ -104,7 +105,7 @@ claude mcp add --transport http calotype "<span class="origin">https://calotype.
   <ul>
     <li><strong>It works with nothing installed.</strong> The README's requirements start with Node.js 20, and the browser runs where the server runs. An agent with no shell, no Node.js or no room for a browser cannot use it. Calotype needs only an outbound HTTPS request.</li>
     <li><strong>It keeps the browser out of your network.</strong> The README says: "Playwright MCP is <strong>not</strong> a security boundary." Its origin lists are described as not serving as one either. A browser the agent can steer, on your machine, can open addresses inside your network. Calotype's browser is outside it and refuses private addresses. More on that in <a href="/guides/headless-browser-ssrf">why a headless browser inside your network is a risk</a>.</li>
-    <li><strong>It is one small tool.</strong> One tool with seven arguments, against a browser's worth of tools. An agent that only ever needs a look at a public page has less to load and less to get wrong.</li>
+    <li><strong>It is one small tool.</strong> One tool with eight arguments, against a browser's worth of tools. An agent that only ever needs a look at a public page has less to load and less to get wrong.</li>
     <li><strong>It has dark mode and ad blocking as arguments.</strong> Neither is an argument of <code>browser_take_screenshot</code> in the README.</li>
   </ul>
 

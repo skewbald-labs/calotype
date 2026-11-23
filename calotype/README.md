@@ -103,6 +103,7 @@ Each test writes under its own collection prefix and deletes it afterwards.
 | `url` | required | http or https, public address, up to 2,048 characters, no `user:pass@` |
 | `width`, `height` | 1280, 800 | 100 to 3840, 100 to 2160 |
 | `full_page` | false | captures up to 20,000 px tall (WebP: 16,383 px, a format limit), and at most 80 megapixels. The page is first scrolled through one screen at a time (a few seconds at most) with reduced motion requested, so sections revealed on scroll and lazy images are drawn |
+| `scroll_y` | 0 | 0 to 20,000: capture the one screen whose top is this far down the page instead of the first, at the same readable size. The page is scrolled there a screen at a time with reduced motion requested; past the last screen, the last screen is captured. Not with `full_page` (`invalid_parameters`) |
 | `format` | png | png, jpeg (or jpg), webp |
 | `quality` | 80 | 1 to 100, jpeg and webp only |
 | `device_scale_factor` | 1 | 1 to 3 |
@@ -111,7 +112,7 @@ Each test writes under its own collection prefix and deletes it afterwards.
 | `block_ads` | false | blocks the domains in `adblock_domains.txt` and their subdomains |
 | `dark_mode` | false | sets `prefers-color-scheme: dark` |
 
-Unknown parameters are refused, so typos fail loudly. A capture has 30 seconds in total. The image comes back with headers `X-Calotype-Usage` (`used/limit`), `X-Calotype-Target-Status`, `X-Calotype-Page-Height` (the whole page's height; the MCP tool says the same in words when the image is only the first screen) and, if the page hit the byte cap, `X-Calotype-Truncated: 1`.
+Unknown parameters are refused, so typos fail loudly. A capture has 30 seconds in total. The image comes back with headers `X-Calotype-Usage` (`used/limit`), `X-Calotype-Target-Status`, `X-Calotype-Page-Height` (the whole page's height; the MCP tool says the same in words, with the `scroll_y` of the next screen, when the image is one screen of a longer page), `X-Calotype-Scroll-Y` (for a one-screen capture, the y of the screen's top as captured) and, if the page hit the byte cap, `X-Calotype-Truncated: 1`.
 
 Errors are JSON, `{"error": {"code": ..., "message": ...}}`:
 
@@ -187,7 +188,7 @@ Other CLI commands: `list-keys`, `revoke-key ID`, `delete-key ID`, `key-id`, `ma
 
 ## MCP server
 
-The service is a remote MCP server at `POST /mcp` (`remote_mcp.py`): streamable HTTP, stateless, JSON responses, built on the official `mcp` SDK. The caller's key goes in `Authorization: Bearer <key>` and is checked like `/v1/screenshot`'s; the one tool, `screenshot(url, full_page, width, height, format, dark_mode, block_ads)`, runs through the same `capture_for_key` path as the API (plan, limits, SSRF policy, quota, refunds, logs). With no key, `initialize`, `tools/list` and `ping` still work, so directories can inspect the server; a wrong or revoked key answers 401; GET and DELETE answer 405 (a browser's GET gets that 405 as a help page, `keypages.py`). Client setup is on `/docs#mcp`. `deploy/mcp-registry/server.json` is the (unpublished) MCP Registry entry.
+The service is a remote MCP server at `POST /mcp` (`remote_mcp.py`): streamable HTTP, stateless, JSON responses, built on the official `mcp` SDK. The caller's key goes in `Authorization: Bearer <key>` and is checked like `/v1/screenshot`'s; the one tool, `screenshot(url, full_page, width, height, format, dark_mode, block_ads, scroll_y)`, runs through the same `capture_for_key` path as the API (plan, limits, SSRF policy, quota, refunds, logs). With no key, `initialize`, `tools/list` and `ping` still work, so directories can inspect the server; a wrong or revoked key answers 401; GET and DELETE answer 405 (a browser's GET gets that 405 as a help page, `keypages.py`). Client setup is on `/docs#mcp`. `deploy/mcp-registry/server.json` is the (unpublished) MCP Registry entry.
 
 ```sh
 claude mcp add --transport http calotype https://calotype.dev/mcp --header "Authorization: Bearer cal_..."
@@ -221,7 +222,7 @@ There is also a local stdio server, for development against a local API:
   "env": {"CALOTYPE_API_KEY": "cal_...", "CALOTYPE_API_URL": "http://127.0.0.1:8080"}}}}
 ```
 
-It runs from a checkout of this repo (the working directory must contain `calotype/`). It has one tool, `screenshot(url, width, height, full_page, format, dark_mode, block_ads, delay_ms)`. It defaults to JPEG with ads blocked, to keep images small for model context. It is not published to PyPI; use the remote endpoint instead.
+It runs from a checkout of this repo (the working directory must contain `calotype/`). It has one tool, `screenshot(url, width, height, full_page, format, dark_mode, block_ads, delay_ms, scroll_y)`. It defaults to JPEG with ads blocked, to keep images small for model context. It is not published to PyPI; use the remote endpoint instead.
 
 ## Configuration
 
