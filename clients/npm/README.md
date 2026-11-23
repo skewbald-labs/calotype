@@ -54,8 +54,9 @@ Needs Node.js 20 or newer.
 | `format` | `png`, `jpeg` or `webp` | `jpeg` | Image format. jpeg and webp are much smaller than png. |
 | `dark_mode` | boolean | `false` | Ask the page for its dark colour scheme. |
 | `block_ads` | boolean | `true` | Block requests to common ad and tracking domains. |
+| `scroll_y` | integer, 0 to 20000 | `0` | Capture one screen further down: the screen whose top is this many CSS pixels from the top of the page. Past the end, the last screen. Not with `full_page`. |
 
-It returns the image and one line of text: the size, the page's HTTP status if it was an error, and how much of the month's quota the key has used. A failure comes back as a tool error that starts with the API's error code, for example `quota_exceeded: ...` or `blocked_target: ...`. Failed captures are not counted. Private, local and cloud-metadata addresses are refused.
+It returns the image and one line of text: the size, the page's HTTP status if it was an error, which screen of a longer page the image is and the `scroll_y` of the next one, and how much of the month's quota the key has used. A failure comes back as a tool error that starts with the API's error code, for example `quota_exceeded: ...` or `blocked_target: ...`. Failed captures are not counted. Private, local and cloud-metadata addresses are refused.
 
 The tool's name, description, arguments and annotations are the same as the hosted server's; `npm run test:live` checks that against `https://calotype.dev/mcp`.
 

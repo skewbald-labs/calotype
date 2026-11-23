@@ -56,6 +56,45 @@ test('passes the caller’s arguments through and drops ones the tool does not h
   assert.match(result.content[1].text, /^Screenshot of https:\/\/example\.com\/a \(png, 390x5000 px, 33 bytes\)\.$/);
 });
 
+test('scroll_y is sent only when set, and the summary says which screen came back', async () => {
+  const { fetch, calls } = fakeFetch(
+    imageResponse(jpegHeader(1280, 800), { 'x-calotype-page-height': '5427', 'x-calotype-scroll-y': '800' }),
+    imageResponse(jpegHeader(1280, 800), { 'x-calotype-page-height': '5427', 'x-calotype-scroll-y': '0' }),
+    imageResponse(jpegHeader(1280, 800), { 'x-calotype-page-height': '5427', 'x-calotype-scroll-y': '4627' }),
+  );
+  const middle = await screenshot({ url: 'https://example.com', scroll_y: 800 }, { env, fetch });
+  assert.equal(calls[0].body.scroll_y, 800);
+  assert.equal(
+    middle.content[1].text,
+    'Screenshot of https://example.com (jpeg, 1280x800 px, 20 bytes). This is screen 2 of about 7 ' +
+      '(y = 800 to 1,600 of about 5,427 px). For the next screen, call again with scroll_y=1600.',
+  );
+
+  const first = await screenshot({ url: 'https://example.com', scroll_y: 0 }, { env, fetch });
+  assert.equal('scroll_y' in calls[1].body, false);
+  assert.equal(
+    first.content[1].text,
+    'Screenshot of https://example.com (jpeg, 1280x800 px, 20 bytes). This is screen 1 of about 7 ' +
+      '(the top 800 px of a page about 5,427 px tall). To see the next screen at readable size, call again with ' +
+      'scroll_y=800; full_page=true captures the whole page in one (smaller) image.',
+  );
+
+  const past = await screenshot({ url: 'https://example.com', scroll_y: 9000 }, { env, fetch });
+  assert.match(past.content[1].text, /scroll_y=9000 is past the end of the page, so the last screen was captured instead\./);
+  assert.match(past.content[1].text, /This is screen 7 of about 7 \(y = 4,627 to 5,427 of about 5,427 px\): the bottom of the page\.$/);
+});
+
+test('the screen note stays quiet for a page that fits and for a full page', async () => {
+  const { screenNote } = await import('../src/server.js');
+  assert.equal(screenNote({ fullPage: false, view: 800, asked: 0, pageHeight: 900, y: 0 }), '');
+  assert.equal(screenNote({ fullPage: true, view: 800, asked: 0, pageHeight: 9000 }), '');
+  assert.equal(screenNote({ fullPage: false, view: 800, asked: 0, pageHeight: undefined, y: undefined }), '');
+  assert.equal(
+    screenNote({ fullPage: false, view: 800, asked: 800, pageHeight: 600, y: 0 }),
+    ' The page is about 600 px tall and fits in one screen, so scroll_y=800 was moved to 0: this is the whole page.',
+  );
+});
+
 test('the summary names a failing page, a truncated download and sizes in KB', async () => {
   const image = Buffer.concat([webpHeader(800, 600), Buffer.alloc(4096)]);
   const { fetch } = fakeFetch(

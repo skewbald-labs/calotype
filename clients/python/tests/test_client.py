@@ -47,6 +47,7 @@ def test_screenshot_passes_every_parameter_through():
         wait_until="networkidle",
         block_ads=True,
         dark_mode=False,
+        scroll_y=1600,
     )
     assert transport.last_json() == {
         "url": "https://example.com",
@@ -60,6 +61,7 @@ def test_screenshot_passes_every_parameter_through():
         "wait_until": "networkidle",
         "block_ads": True,
         "dark_mode": False,  # False is a value, not "unset"
+        "scroll_y": 1600,
     }
 
 
@@ -85,7 +87,16 @@ def test_capture_reads_the_usage_and_page_headers():
 
     bare = client.capture("https://example.com")
     assert (bare.used, bare.limit, bare.target_status, bare.truncated, bare.duration_ms) == (None, None, None, False, None)
+    assert (bare.page_height, bare.scroll_y) == (None, None)
     assert "fake image" not in repr(bare)
+
+
+def test_capture_reads_where_the_screen_is_in_the_page():
+    transport = FakeTransport(image_response(**{"x-calotype-page-height": "5427", "x-calotype-scroll-y": "4627"}))
+    shot = Calotype("cal_test", transport=transport).capture("https://example.com", scroll_y=9000)
+    assert transport.last_json() == {"url": "https://example.com", "scroll_y": 9000}
+    # Past the last screen: the API captured the last screen and says where it starts.
+    assert (shot.page_height, shot.scroll_y) == (5427, 4627)
 
 
 def test_create_key_needs_no_key_and_tags_the_source():

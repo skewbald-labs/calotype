@@ -80,6 +80,7 @@ test('sends the options the user set, under the API’s names, and nothing else'
 					waitUntil: 'networkidle',
 					blockAds: true,
 					darkMode: false,
+					scrollY: 1600,
 					fileName: 'pricing.jpg',
 				},
 			},
@@ -89,6 +90,8 @@ test('sends the options the user set, under the API’s names, and nothing else'
 				'content-type': 'image/jpeg',
 				'x-calotype-target-status': '404',
 				'x-calotype-truncated': '1',
+				'x-calotype-page-height': '5427',
+				'x-calotype-scroll-y': '1600',
 			}),
 	});
 	const [[item]] = await run(context);
@@ -106,6 +109,7 @@ test('sends the options the user set, under the API’s names, and nothing else'
 		wait_until: 'networkidle',
 		block_ads: true,
 		dark_mode: false,
+		scroll_y: 1600,
 	});
 	assert.deepEqual(Object.keys(item.binary), ['shot']);
 	assert.equal(item.binary.shot.fileName, 'pricing.jpg');
@@ -118,6 +122,8 @@ test('sends the options the user set, under the API’s names, and nothing else'
 		fileSize: 4,
 		truncated: true,
 		targetStatus: 404,
+		pageHeight: 5427,
+		scrollY: 1600,
 	});
 });
 

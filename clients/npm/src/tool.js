@@ -12,7 +12,8 @@ export const SCREENSHOT_TOOL = {
   description:
     'Take a screenshot of a public web page and return it as an image. ' +
     'By default the image is the first screen only (the viewport, 1280x800); the result says how tall the ' +
-    'whole page is, and full_page=true captures all of it. ' +
+    'whole page is and which scroll_y shows the next screen. scroll_y captures one screen further down at ' +
+    'readable size; full_page=true captures all of it in one (smaller) image. ' +
     'Use it to see what a page looks like: its layout, text, charts or errors as rendered in Chromium. ' +
     'Only public http(s) pages; private and local addresses are refused. ' +
     "Each successful call counts as one screenshot against the key's monthly quota; failed ones do not. " +
@@ -68,6 +69,17 @@ export const SCREENSHOT_TOOL = {
         title: 'Block Ads',
         description: 'Block requests to common ad and tracking domains.',
         default: true,
+      },
+      scroll_y: {
+        type: 'integer',
+        title: 'Scroll Y',
+        description:
+          "Capture one screen further down the page, at the same readable size: the y, in CSS pixels, of the screen's " +
+          "top (0 is the first screen; the result gives the next one's). The page is scrolled there first, so sections " +
+          'that appear on scroll are shown. Past the end, the last screen is captured. Not with full_page.',
+        minimum: 0,
+        maximum: 20000,
+        default: 0,
       },
     },
     required: ['url'],

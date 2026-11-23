@@ -57,6 +57,7 @@ const OPTIONAL_PARAMETERS: Array<[string, string]> = [
 	['waitUntil', 'wait_until'],
 	['blockAds', 'block_ads'],
 	['darkMode', 'dark_mode'],
+	['scrollY', 'scroll_y'],
 ];
 
 // One item: one request to POST /v1/screenshot. Every failure is thrown as a
@@ -127,6 +128,8 @@ async function takeScreenshot(
 	const fileName = (options.fileName as string | undefined)?.trim() || `screenshot.${extension}`;
 	const [used, limit] = (header(response.headers, 'x-calotype-usage') ?? '').split('/').map(Number);
 	const targetStatus = Number(header(response.headers, 'x-calotype-target-status'));
+	const pageHeight = Number(header(response.headers, 'x-calotype-page-height'));
+	const scrollY = header(response.headers, 'x-calotype-scroll-y');
 
 	const json: IDataObject = {
 		url,
@@ -137,6 +140,9 @@ async function takeScreenshot(
 		truncated: header(response.headers, 'x-calotype-truncated') !== undefined,
 	};
 	if (targetStatus) json.targetStatus = targetStatus;
+	// How tall the whole page is, and for a one-screen capture where in it the screen starts.
+	if (pageHeight) json.pageHeight = pageHeight;
+	if (scrollY !== undefined && /^\d+$/.test(scrollY)) json.scrollY = Number(scrollY);
 	if (Number.isFinite(used) && Number.isFinite(limit)) {
 		json.screenshotsUsed = used;
 		json.screenshotsLimit = limit;
@@ -290,6 +296,15 @@ export class Calotype implements INodeType {
 						typeOptions: { minValue: 1, maxValue: 100 },
 						default: 80,
 						description: 'The image quality, from 1 to 100. For JPEG and WebP only.',
+					},
+					{
+						displayName: 'Scroll Y',
+						name: 'scrollY',
+						type: 'number',
+						typeOptions: { minValue: 0, maxValue: 20000 },
+						default: 800,
+						description:
+							'Capture one screen further down the page: the screen whose top is this many CSS pixels from the top. Past the end, the last screen. Not with Full Page.',
 					},
 					{
 						displayName: 'Wait Until',

@@ -50,7 +50,7 @@ print(usage.used, usage.limit, usage.remaining, usage.resets_at)
 
 ### More than the bytes
 
-`capture()` takes the same arguments as `screenshot()` and returns a `Screenshot`: `image`, `content_type`, `used` and `limit` (the key's count after this capture), `target_status` (the page's own HTTP status), `truncated` and `duration_ms`.
+`capture()` takes the same arguments as `screenshot()` and returns a `Screenshot`: `image`, `content_type`, `used` and `limit` (the key's count after this capture), `target_status` (the page's own HTTP status), `truncated`, `duration_ms`, `page_height` (the whole page's height in CSS pixels) and `scroll_y` (for a one-screen capture, how far down the page the screen starts).
 
 ## Parameters
 
@@ -68,6 +68,7 @@ All optional and keyword-only. One left out is not sent, so the API's default ap
 | `wait_until` | `"load"`, `"domcontentloaded"`, `"networkidle"`, `"commit"` | `"load"` | When the page counts as loaded. |
 | `block_ads` | bool | `False` | Block requests to common ad and tracking domains. |
 | `dark_mode` | bool | `False` | Ask the page for its dark colour scheme. |
+| `scroll_y` | int, 0 to 20000 | 0 | Capture one screen further down: the screen whose top is this many CSS pixels from the top of the page. Past the end, the last screen. Not with `full_page`. |
 
 ## Errors
 

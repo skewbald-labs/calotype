@@ -78,6 +78,11 @@ class Screenshot:
     #: True if the page passed the download limit and the image shows what had loaded by then.
     truncated: bool
     duration_ms: int | None
+    #: The whole scrolling page's height in CSS pixels, when the page said.
+    page_height: int | None = None
+    #: For a one-screen capture: how far down the page the screen's top is (less than the
+    #: ``scroll_y`` sent when that was past the last screen). None for a full page.
+    scroll_y: int | None = None
 
 
 @dataclass(frozen=True)
@@ -158,11 +163,14 @@ class Calotype:
         wait_until: WaitUntil | None = None,
         block_ads: bool | None = None,
         dark_mode: bool | None = None,
+        scroll_y: int | None = None,
     ) -> bytes:
         """Capture ``url`` and return the image bytes.
 
         Parameters left as ``None`` are not sent, so the API's defaults apply:
-        a 1280 by 800 PNG of the viewport. Reference: https://calotype.dev/docs
+        a 1280 by 800 PNG of the viewport. ``scroll_y`` captures one screen further
+        down the page instead of the first (not with ``full_page``); ``capture``
+        reports how tall the page is. Reference: https://calotype.dev/docs
         """
         return self.capture(
             url,
@@ -176,6 +184,7 @@ class Calotype:
             wait_until=wait_until,
             block_ads=block_ads,
             dark_mode=dark_mode,
+            scroll_y=scroll_y,
         ).image
 
     def capture(
@@ -192,6 +201,7 @@ class Calotype:
         wait_until: WaitUntil | None = None,
         block_ads: bool | None = None,
         dark_mode: bool | None = None,
+        scroll_y: int | None = None,
     ) -> Screenshot:
         """Like ``screenshot``, but also returns the usage count and the page's status."""
         params = {
@@ -206,6 +216,7 @@ class Calotype:
             "wait_until": wait_until,
             "block_ads": block_ads,
             "dark_mode": dark_mode,
+            "scroll_y": scroll_y,
         }
         resp = self._send("POST", "/v1/screenshot", {k: v for k, v in params.items() if v is not None}, auth=True)
         used, _, limit = resp.headers.get("x-calotype-usage", "").partition("/")
@@ -217,6 +228,8 @@ class Calotype:
             target_status=_int(resp.headers.get("x-calotype-target-status")),
             truncated=bool(resp.headers.get("x-calotype-truncated")),
             duration_ms=_int(resp.headers.get("x-calotype-duration-ms")),
+            page_height=_int(resp.headers.get("x-calotype-page-height")),
+            scroll_y=_int(resp.headers.get("x-calotype-scroll-y")),
         )
 
     def create_key(self, ref: str | None = "pypi", *, email: str | None = None) -> NewKey:

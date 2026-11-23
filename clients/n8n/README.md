@@ -31,7 +31,7 @@ Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes
 | Full Page | Capture the whole scrolling page (up to 20,000 px tall) instead of only the visible part. |
 | Put Output File in Field | The binary field the image goes in. Default `data`. |
 
-Under **Options**: Block Ads, Dark Mode, Delay (Ms), Device Scale Factor, File Name, Height, Quality, Wait Until and Width. An option you do not add is not sent, so Calotype's default applies (a 1280 by 800 window, no delay). The limits of each are in the [API reference](https://calotype.dev/docs).
+Under **Options**: Block Ads, Dark Mode, Delay (Ms), Device Scale Factor, File Name, Height, Quality, Scroll Y, Wait Until and Width. Scroll Y captures one screen further down a long page instead of the first, at the same size (not with Full Page). An option you do not add is not sent, so Calotype's default applies (a 1280 by 800 window, no delay). The limits of each are in the [API reference](https://calotype.dev/docs).
 
 Each output item has the image as a binary file and these JSON fields:
 
@@ -42,6 +42,8 @@ Each output item has the image as a binary file and these JSON fields:
 | `screenshotsUsed`, `screenshotsLimit` | The key's count for the month after this capture, and its monthly limit. |
 | `targetStatus` | The page's own HTTP status, when Calotype reports one. A page that answers 404 is still captured. |
 | `truncated` | `true` if the page passed the 50 MB download limit; the image shows what had loaded by then. |
+| `pageHeight` | The whole page's height in CSS pixels, when the page says. |
+| `scrollY` | For a one-screen capture, how far down the page the screen starts, in CSS pixels. Less than the Scroll Y sent when that was past the last screen. |
 
 ## Credentials
 

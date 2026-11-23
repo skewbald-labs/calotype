@@ -23,6 +23,9 @@ export const USER_AGENT = `calotype-mcp/${VERSION}`;
 const TIMEOUT_MS = 90_000;
 const CONTENT_TYPES = { png: 'image/png', jpeg: 'image/jpeg', webp: 'image/webp' };
 const ARGUMENTS = Object.entries(SCREENSHOT_TOOL.inputSchema.properties);
+// Arguments the API took later than the others: sent only when set, so an older API,
+// which refuses parameters it does not know, still answers every other call.
+const SENT_ONLY_WHEN_SET = new Set(['scroll_y']);
 
 /** What to tell a caller whose environment has no key. */
 export function keyHelp(origin) {
@@ -53,7 +56,51 @@ function errorText(status, body) {
   return text;
 }
 
-function summary(url, format, image, headers) {
+/**
+ * For the agent: which screen of the page a one-screen image is, and how to see the next one.
+ * The same sentences as the hosted server's (below_the_fold in calotype/remote_mcp.py).
+ * `y` is the screen's top as captured, less than `asked` when that was past the last screen.
+ */
+export function screenNote({ fullPage, view, asked, pageHeight, y }) {
+  const n = (v) => v.toLocaleString('en-US');
+  if (fullPage) return '';
+  if (!Number.isFinite(y)) y = asked;
+  if (!pageHeight) return y ? ` This is the screen from y = ${n(y)} to ${n(y + view)} px of the page.` : '';
+  const clamped = y < asked;
+  if (!clamped && y === 0 && pageHeight <= view * 1.25) return '';
+  if (clamped && y === 0) {
+    if (pageHeight > view * 1.25) {
+      return ` The page would not scroll to scroll_y=${asked} (it may scroll inside an element), so this is its first screen.`;
+    }
+    return ` The page is about ${n(pageHeight)} px tall and fits in one screen, so scroll_y=${asked} was moved to 0: this is the whole page.`;
+  }
+  const screens = Math.max(1, Math.ceil(pageHeight / view));
+  const atEnd = y + view >= pageHeight;
+  const screen = atEnd ? screens : Math.min(screens, Math.floor(y / view) + 1);
+  let text = clamped ? ` scroll_y=${asked} is past the end of the page, so the last screen was captured instead.` : '';
+  if (y === 0) {
+    text += ` This is screen 1 of about ${screens} (the top ${n(view)} px of a page about ${n(pageHeight)} px tall).`;
+  } else {
+    const where = `y = ${n(y)} to ${n(Math.min(y + view, pageHeight))} of about ${n(pageHeight)} px`;
+    text += ` This is screen ${screen} of about ${screens} (${where})` + (atEnd ? ': the bottom of the page.' : '.');
+  }
+  if (!atEnd) {
+    const following = Math.min(y + view, pageHeight - view);
+    text +=
+      y === 0
+        ? ` To see the next screen at readable size, call again with scroll_y=${following};` +
+          ' full_page=true captures the whole page in one (smaller) image.'
+        : ` For the next screen, call again with scroll_y=${following}.`;
+  }
+  return text;
+}
+
+function headerInt(headers, name) {
+  const raw = headers.get(name);
+  return raw !== null && /^\d+$/.test(raw) ? Number(raw) : undefined;
+}
+
+function summary(url, format, image, headers, body) {
   const n = image.length;
   let size = n < 1024 ? `${n} bytes` : `${Math.round(n / 1024)} KB`;
   const dims = imageSize(image);
@@ -64,6 +111,13 @@ function summary(url, format, image, headers) {
   if (headers.get('x-calotype-truncated')) {
     text += ' The page passed the 50 MB download limit; the image shows what had loaded by then.';
   }
+  text += screenNote({
+    fullPage: Boolean(body.full_page),
+    view: Number(body.height),
+    asked: Number(body.scroll_y ?? 0),
+    pageHeight: headerInt(headers, 'x-calotype-page-height'),
+    y: headerInt(headers, 'x-calotype-scroll-y'),
+  });
   const usage = /^(\d+)\/(\d+)$/.exec(headers.get('x-calotype-usage') ?? '');
   if (usage) text += ` This key has used ${usage[1]} of ${usage[2]} screenshots this month.`;
   return text;
@@ -83,7 +137,8 @@ export async function screenshot(args, { env = process.env, fetch = globalThis.f
   const body = {};
   for (const [name, schema] of ARGUMENTS) {
     const value = args?.[name] ?? schema.default;
-    if (value !== undefined) body[name] = value;
+    if (value === undefined || (SENT_ONLY_WHEN_SET.has(name) && !value)) continue;
+    body[name] = value;
   }
 
   let response;
@@ -112,7 +167,7 @@ export async function screenshot(args, { env = process.env, fetch = globalThis.f
   return {
     content: [
       { type: 'image', data: image.toString('base64'), mimeType: CONTENT_TYPES[format] ?? mimeType },
-      { type: 'text', text: summary(body.url, format, image, response.headers) },
+      { type: 'text', text: summary(body.url, format, image, response.headers, body) },
     ],
   };
 }
