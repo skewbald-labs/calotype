@@ -497,7 +497,7 @@ def test_the_figures_come_from_the_plans_and_settings_not_the_page(make_client):
     plans = {"free": Plan("free", 37, 0, "Free"), "pro": Plan("pro", 9000, 4900, "Pro")}
     c = make_client(plans=plans, capture_timeout_s=21, keys_per_ip_per_hour=1, keys_global_per_hour=77)
     line = "Free plan: 37 screenshots a month. No account, no email."
-    for path in ("/", "/agents", "/keys"):
+    for path in ("/", "/keys"):
         assert line in c.get(path).text, path
     for path in ("/mcp", "/v1/keys", "/v1/screenshot"):
         assert line in c.get(path, headers=BROWSER).text, path
@@ -573,8 +573,8 @@ def test_an_oversized_form_is_refused(web, sqlite_store):
 # --- the button on the site's pages --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path, before", [("/", 'id="why-hosted"'), ("/agents", 'id="create-key"')])
-def test_home_and_agents_carry_the_button_near_their_curl_line(web, path, before):
+@pytest.mark.parametrize("path, before", [("/", 'id="why-hosted"')])
+def test_home_carries_the_button_near_its_curl_line(web, path, before):
     doc = web.get(path).text
     main = main_of(doc)
     button = button_of(doc)
@@ -688,3 +688,10 @@ def test_a_stored_day_without_the_new_steps_reads_as_zero(store):
     store.record_funnel("2026-11-20", "web_key")
     day = store.funnel_days(["2026-11-20"])[0]
     assert (day.api_page, day.web_key, day.key_made) == (1, 2, 1)
+
+
+def test_agents_keeps_its_one_script_button_and_gets_no_second_one(web):
+    # /agents#key already has the script button a few lines under the curl line; two buttons
+    # side by side would only confuse.
+    doc = web.get("/agents").text
+    assert 'id="create-key"' in doc and '<form class="getkey"' not in doc
