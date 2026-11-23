@@ -552,3 +552,89 @@ def test_parallel_takes_of_one_code_give_it_once(store):
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: store.take_oauth_code("a" * 64), range(8)))
     assert sum(r is not None for r in results) == 1
+
+
+# --- prepaid purchases paid on Tempo, and the claims that make a transfer pay once (tempo.py) -----
+
+TX = "0x" + "ab" * 32
+
+
+def test_a_tempo_purchase_keeps_its_transaction_hash_and_payment_intent(store):
+    _, key = store.create_key("free")
+    added, balance = store.add_credit_purchase(
+        TX, key.id, pack="starter", screenshots=5000, amount_cents=1900, currency="usd", challenge_id="ch1",
+        method="tempo",
+    )
+    assert (added, balance) == (True, 5000)
+    purchase = store.get_credit_purchase(TX)
+    assert (purchase.method, purchase.payment_intent, purchase.stripe_payment_intent) == ("tempo", None, None)
+    # Linked once Stripe has recorded it; never relinked to another PaymentIntent.
+    assert store.set_credit_payment_intent(TX, "pi_test_1")
+    assert store.set_credit_payment_intent(TX, "pi_test_1")
+    assert not store.set_credit_payment_intent(TX, "pi_test_2")
+    assert not store.set_credit_payment_intent("0x" + "cd" * 32, "pi_test_1")
+    purchase = store.get_credit_purchase(TX)
+    assert purchase.payment_intent == purchase.stripe_payment_intent == "pi_test_1"
+    assert store.list_credit_purchases(key.id) == [purchase]
+    assert store.find_credit_purchase_by_challenge("ch1") == purchase
+
+
+def test_a_card_purchase_is_its_own_payment_intent(store):
+    _, key = store.create_key("free")
+    store.add_credit_purchase("pi_test_9", key.id, pack="starter", screenshots=10, amount_cents=1900, currency="usd")
+    purchase = store.get_credit_purchase("pi_test_9")
+    assert purchase.payment_intent is None and purchase.stripe_payment_intent == "pi_test_9"
+
+
+def test_a_purchase_can_be_recorded_with_its_payment_intent(store):
+    _, key = store.create_key("free")
+    store.add_credit_purchase(
+        TX, key.id, pack="starter", screenshots=10, amount_cents=1900, currency="usd", method="tempo",
+        payment_intent="pi_test_3",
+    )
+    assert store.get_credit_purchase(TX).payment_intent == "pi_test_3"
+
+
+def test_a_payment_claim_has_one_owner(store):
+    claim = f"mpp:charge:{TX}"
+    assert store.get_payment_claim(claim) is None
+    assert store.claim_payment(claim, "challenge-a", TX)
+    assert store.claim_payment(claim, "challenge-a", TX)  # the same owner again: still its own
+    assert not store.claim_payment(claim, "challenge-b", TX)
+    assert store.get_payment_claim(claim) == ("challenge-a", TX)
+    store.release_payment_claim(claim, "challenge-b")  # not the owner: nothing happens
+    assert store.get_payment_claim(claim) == ("challenge-a", TX)
+    store.release_payment_claim(claim, "challenge-a")
+    assert store.get_payment_claim(claim) is None
+    assert store.claim_payment(claim, "challenge-b", TX)
+
+
+def test_parallel_claims_of_one_payment_give_it_to_one_owner(store):
+    claim = f"mpp:charge:{TX}"
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        won = list(pool.map(lambda i: store.claim_payment(claim, f"challenge-{i}", TX), range(16)))
+    assert won.count(True) == 1
+    assert store.get_payment_claim(claim) == (f"challenge-{won.index(True)}", TX)
+
+
+def test_an_older_database_gets_the_payment_intent_column(tmp_path):
+    import sqlite3
+
+    from calotype.storage import SQLiteStorage
+
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE credit_purchases (id TEXT PRIMARY KEY, key_id INTEGER NOT NULL, pack TEXT NOT NULL, "
+        "screenshots INTEGER NOT NULL, amount_cents INTEGER NOT NULL, currency TEXT NOT NULL, "
+        "challenge_id TEXT NOT NULL DEFAULT '', method TEXT NOT NULL DEFAULT 'stripe', created_at TEXT NOT NULL, "
+        "refunded_at TEXT, credits_removed INTEGER NOT NULL DEFAULT 0, refund_id TEXT);"
+    )
+    db.close()
+    s = SQLiteStorage(path)
+    s.init()
+    _, key = s.create_key("free")
+    s.add_credit_purchase(TX, key.id, pack="starter", screenshots=1, amount_cents=1900, currency="usd",
+                          method="tempo", payment_intent="pi_test_1")
+    assert s.get_credit_purchase(TX).payment_intent == "pi_test_1"
+    s.close()

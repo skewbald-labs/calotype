@@ -15,8 +15,13 @@ the ids of Stripe webhook events already handled, so a repeated delivery is
 not applied twice, and the quota notices queued for keys with an address
 (``Notice``: key id, month, threshold, counts; never the address). For prepaid
 credit (``credits.py``): each key's credit balance, and one record per
-purchase with the Stripe PaymentIntent id, the pack, the amount and the times
-it was made and refunded. No name, IP address or other personal data.
+purchase with the Stripe PaymentIntent id (a card) or the Tempo transaction
+hash and its PaymentIntent (a stablecoin), the pack, the amount and the times
+it was made and refunded. For stablecoin payments also one payment claim per
+transaction (``claim_payment``: the transaction hash and the challenge that
+spent it, no key id), kept so that one transfer pays once. A transaction hash
+is public on the chain and names the paying wallet there. No name, IP address
+or other personal data.
 
 The email address is used for one thing: telling the holder when the key
 reaches 80% and 100% of its monthly quota (``notices.py``). The service only
@@ -32,8 +37,15 @@ Prepaid credit is a second, smaller counter next to the monthly one. A
 screenshot is counted against the month's plan quota first (``try_consume``);
 only when that is used up does the app take one credit (``consume_credit``).
 ``add_credit_purchase`` records a purchase and adds its screenshots in one
-atomic step, keyed by the PaymentIntent id, so the same payment arriving twice
-(a retried request, a replayed webhook) adds credit once.
+atomic step, keyed by the PaymentIntent id (a card) or the transaction hash (a
+stablecoin), so the same payment arriving twice (a retried request, a replayed
+webhook) adds credit once.
+
+Payment claims (``claim_payment``) are the replay record the Tempo method's
+SDK keeps (``tempo.py``): a claim is taken atomically by one owner, the MPP
+challenge being paid, and a second owner is refused. The same owner taking it
+again succeeds, so a buyer resending the same credential after a failure is
+checked again instead of being told the payment was used. Claims never expire.
 
 The free tries on the home page (``tries.py``) are counted per UTC day
 (``TryDay``): how many there were and how each ended. Never the URL, the host
@@ -145,18 +157,30 @@ class Contact:
 class CreditPurchase:
     """One prepaid pack bought with one payment."""
 
-    id: str  # the Stripe PaymentIntent id; the same payment is never recorded twice
+    # The payment's own id, so the same payment is never recorded twice: the Stripe
+    # PaymentIntent id for a card, the Tempo transaction hash (0x...) for a stablecoin.
+    id: str
     key_id: int
     pack: str
     screenshots: int
     amount_cents: int
     currency: str
     challenge_id: str  # the MPP challenge that was paid; "" if recorded from a webhook alone
-    method: str  # the MPP payment method, e.g. "stripe"
+    method: str  # the MPP payment method: "stripe" (a card) or "tempo" (USDC on Tempo)
     created_at: str
     refunded_at: str | None = None
     credits_removed: int = 0  # unused credit taken back when it was refunded
     refund_id: str | None = None  # the Stripe Refund id, once Stripe has made the refund
+    # The PaymentIntent that records a Tempo payment in Stripe, once Stripe has one. None for a
+    # card, whose id is its PaymentIntent already. ``stripe_payment_intent`` covers both.
+    payment_intent: str | None = None
+
+    @property
+    def stripe_payment_intent(self) -> str | None:
+        """The PaymentIntent to refund, or None if Stripe holds none for this payment."""
+        if self.payment_intent:
+            return self.payment_intent
+        return self.id if self.id.startswith("pi_") else None
 
 
 # A key made from a link tagged ?ref=<tag> is labelled "ref:<tag>", so the
@@ -296,12 +320,17 @@ class Storage(Protocol):
         currency: str,
         challenge_id: str = "",
         method: str = "stripe",
+        payment_intent: str | None = None,
     ) -> tuple[bool, int]: ...
     def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None: ...
     def find_credit_purchase_by_challenge(self, challenge_id: str) -> CreditPurchase | None: ...
     def list_credit_purchases(self, key_id: int) -> list[CreditPurchase]: ...
     def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None: ...
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool: ...
+    def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool: ...
+    def claim_payment(self, claim: str, owner: str, value: str) -> bool: ...
+    def get_payment_claim(self, claim: str) -> tuple[str, str] | None: ...
+    def release_payment_claim(self, claim: str, owner: str) -> None: ...
     def set_email(self, key_id: int, email: str | None) -> bool: ...
     def keys_with_email(self, email: str) -> list[int]: ...
     def queue_notice(self, notice: Notice) -> bool: ...
@@ -355,7 +384,14 @@ CREATE TABLE IF NOT EXISTS credit_purchases (
     created_at TEXT NOT NULL,
     refunded_at TEXT,
     credits_removed INTEGER NOT NULL DEFAULT 0,
-    refund_id TEXT
+    refund_id TEXT,
+    payment_intent TEXT
+);
+CREATE TABLE IF NOT EXISTS payment_claims (
+    claim TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS notices (
     id TEXT PRIMARY KEY,
@@ -410,6 +446,9 @@ _ADDED_KEY_COLUMNS = {
     "stripe_subscription_id": "TEXT",
     "email": "TEXT",
 }
+_ADDED_PURCHASE_COLUMNS = {
+    "payment_intent": "TEXT",
+}
 _INDEXES = """
 CREATE INDEX IF NOT EXISTS api_keys_subscription ON api_keys (stripe_subscription_id);
 CREATE INDEX IF NOT EXISTS credit_purchases_key ON credit_purchases (key_id);
@@ -445,6 +484,10 @@ class SQLiteStorage:
             for column, kind in _ADDED_KEY_COLUMNS.items():
                 if column not in have:
                     db.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {kind}")
+            have = {row[1] for row in db.execute("PRAGMA table_info(credit_purchases)")}
+            for column, kind in _ADDED_PURCHASE_COLUMNS.items():
+                if column not in have:
+                    db.execute(f"ALTER TABLE credit_purchases ADD COLUMN {column} {kind}")
             db.executescript(_INDEXES)
 
     def close(self) -> None:
@@ -681,6 +724,7 @@ class SQLiteStorage:
         currency: str,
         challenge_id: str = "",
         method: str = "stripe",
+        payment_intent: str | None = None,
     ) -> tuple[bool, int]:
         """Record a paid pack and add its screenshots, once per ``purchase_id``.
 
@@ -699,9 +743,12 @@ class SQLiteStorage:
                 if db.execute("SELECT 1 FROM api_keys WHERE id = ?", (key_id,)).fetchone() is not None:
                     cur = db.execute(
                         "INSERT INTO credit_purchases (id, key_id, pack, screenshots, amount_cents, currency, "
-                        "challenge_id, method, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "challenge_id, method, created_at, payment_intent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                         "ON CONFLICT (id) DO NOTHING",
-                        (purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, now),
+                        (
+                            purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, now,
+                            payment_intent,
+                        ),
                     )
                     added = cur.rowcount == 1
                     if added:
@@ -787,6 +834,44 @@ class SQLiteStorage:
                 (refund_id, purchase_id),
             )
         return cur.rowcount == 1
+
+    def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool:
+        """Link a purchase to the PaymentIntent that records it in Stripe. Never replaces another one."""
+        with self._lock:
+            cur = self._db().execute(
+                "UPDATE credit_purchases SET payment_intent = ? WHERE id = ? "
+                "AND (payment_intent IS NULL OR payment_intent = ?)",
+                (payment_intent, purchase_id, payment_intent),
+            )
+        return cur.rowcount == 1
+
+    # --- payment claims: the replay record of on-chain payments (tempo.py) -------------------
+
+    def claim_payment(self, claim: str, owner: str, value: str) -> bool:
+        """Claim ``claim`` for ``owner``, atomically. True if it was free or is already ``owner``'s."""
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            db = self._db()
+            cur = db.execute(
+                "INSERT INTO payment_claims (claim, owner, value, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (claim) DO NOTHING",
+                (claim, owner, value, now),
+            )
+            if cur.rowcount == 1:
+                return True
+            row = db.execute("SELECT owner FROM payment_claims WHERE claim = ?", (claim,)).fetchone()
+        return row is not None and row[0] == owner
+
+    def get_payment_claim(self, claim: str) -> tuple[str, str] | None:
+        """(owner, value) of a claim, or None."""
+        with self._lock:
+            row = self._db().execute("SELECT owner, value FROM payment_claims WHERE claim = ?", (claim,)).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def release_payment_claim(self, claim: str, owner: str) -> None:
+        """Give up a claim, only if ``owner`` holds it."""
+        with self._lock:
+            self._db().execute("DELETE FROM payment_claims WHERE claim = ? AND owner = ?", (claim, owner))
 
     def _credit_locked(self, key_id: int) -> int:
         row = self._db().execute("SELECT balance FROM credits WHERE key_id = ?", (key_id,)).fetchone()
@@ -956,7 +1041,7 @@ def _row_to_key(row) -> ApiKey:
 
 _PURCHASE_COLUMNS = (
     "id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, created_at, "
-    "refunded_at, credits_removed, refund_id"
+    "refunded_at, credits_removed, refund_id, payment_intent"
 )
 
 
@@ -974,6 +1059,7 @@ def _row_to_purchase(row) -> CreditPurchase:
         refunded_at=row[9],
         credits_removed=int(row[10] or 0),
         refund_id=row[11],
+        payment_intent=row[12],
     )
 
 

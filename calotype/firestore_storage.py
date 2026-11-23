@@ -26,11 +26,16 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     ``create`` fails if the document exists, which makes recording atomic.
 ``{prefix}credits/{id}``
     ``key_id``, ``balance``: the key's prepaid screenshots not yet used.
-``{prefix}credit_purchases/{PaymentIntent id}``
+``{prefix}credit_purchases/{PaymentIntent id or transaction hash}``
     One document per prepaid pack bought: ``id``, ``key_id``, ``pack``,
     ``screenshots``, ``amount_cents``, ``currency``, ``challenge_id``,
     ``method``, ``created_at``, ``refunded_at``, ``credits_removed``,
-    ``refund_id``.
+    ``refund_id``, ``payment_intent`` (a Tempo payment's PaymentIntent; absent
+    on documents written before it existed).
+``{prefix}payment_claims/{SHA-256 of the claim}``
+    The replay record of on-chain payments (``storage.claim_payment``):
+    ``claim``, ``owner`` (the MPP challenge id), ``value``, ``created_at``.
+    ``create`` fails if the document exists, which makes a claim atomic.
 ``{prefix}notices/{id}_{YYYY-MM}_{threshold}``
     A quota notice (``storage.Notice``), queued by the service with
     ``create``, so a key gets at most one per month and threshold. The
@@ -98,6 +103,7 @@ automatically, so no composite index has to be deployed.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import asdict, fields
 from datetime import UTC, datetime
@@ -153,6 +159,7 @@ class FirestoreStorage:
         self._tries = self._client.collection(f"{collection_prefix}tries")
         self._funnel = self._client.collection(f"{collection_prefix}funnel")
         self._codes = self._client.collection(f"{collection_prefix}oauth_codes")
+        self._claims = self._client.collection(f"{collection_prefix}payment_claims")
 
     # --- plumbing -----------------------------------------------------------------
 
@@ -167,6 +174,7 @@ class FirestoreStorage:
         return [
             self._keys, self._usage, self._counter.parent, self._events,
             self._credits, self._purchases, self._notices, self._tries, self._funnel, self._codes,
+            self._claims,
         ]
 
     @staticmethod
@@ -429,6 +437,7 @@ class FirestoreStorage:
         currency: str,
         challenge_id: str = "",
         method: str = "stripe",
+        payment_intent: str | None = None,
     ) -> tuple[bool, int]:
         """Record a paid pack and add its screenshots, once per ``purchase_id``.
 
@@ -455,6 +464,7 @@ class FirestoreStorage:
             "refunded_at": None,
             "credits_removed": 0,
             "refund_id": None,
+            "payment_intent": payment_intent,
         }
         # One atomic batch: the purchase document is created only if it does not
         # exist, and the balance grows by an Increment in the same commit. Either
@@ -535,6 +545,53 @@ class FirestoreStorage:
             return True
 
         return record(self._client.transaction())
+
+    def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool:
+        """Link a purchase to the PaymentIntent that records it in Stripe. Never replaces another one."""
+        ref = self._purchase_ref(purchase_id)
+
+        @firestore.transactional
+        def record(t) -> bool:
+            snap = ref.get(transaction=t)
+            if not snap.exists or snap.to_dict().get("payment_intent") not in (None, payment_intent):
+                return False
+            t.update(ref, {"payment_intent": payment_intent})
+            return True
+
+        return record(self._client.transaction())
+
+    # --- payment claims: the replay record of on-chain payments (tempo.py) -------------------
+
+    def _claim_ref(self, claim: str):
+        return self._claims.document(hashlib.sha256(claim.encode("utf-8")).hexdigest())
+
+    def claim_payment(self, claim: str, owner: str, value: str) -> bool:
+        """Claim ``claim`` for ``owner``, atomically. True if it was free or is already ``owner``'s."""
+        ref = self._claim_ref(claim)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        try:
+            ref.create({"claim": claim, "owner": owner, "value": value, "created_at": now})
+            return True
+        except AlreadyExists:
+            snap = ref.get()
+            return snap.exists and snap.get("owner") == owner
+
+    def get_payment_claim(self, claim: str) -> tuple[str, str] | None:
+        """(owner, value) of a claim, or None."""
+        snap = self._claim_ref(claim).get()
+        return (snap.get("owner"), snap.get("value")) if snap.exists else None
+
+    def release_payment_claim(self, claim: str, owner: str) -> None:
+        """Give up a claim, only if ``owner`` holds it."""
+        ref = self._claim_ref(claim)
+
+        @firestore.transactional
+        def release(t) -> None:
+            snap = ref.get(transaction=t)
+            if snap.exists and snap.get("owner") == owner:
+                t.delete(ref)
+
+        release(self._client.transaction())
 
     # --- the optional email address and quota notices ----------------------------------
 
@@ -711,7 +768,7 @@ def _code_doc_id(code_id: str) -> str:
 
 
 def _purchase_doc_id(purchase_id: str) -> str:
-    # Stripe ids are letters, digits and underscores. Anything else could name
+    # Stripe ids are letters, digits and underscores, transaction hashes 0x and hex. Anything else could name
     # another path, so it is refused rather than escaped.
     if not purchase_id or "/" in purchase_id or purchase_id in (".", "..") or purchase_id.startswith("__"):
         raise ValueError("not a usable purchase id")
@@ -732,6 +789,7 @@ def _doc_to_purchase(d: dict) -> CreditPurchase:
         refunded_at=d.get("refunded_at"),
         credits_removed=int(d.get("credits_removed") or 0),
         refund_id=d.get("refund_id"),
+        payment_intent=d.get("payment_intent"),
     )
 
 
