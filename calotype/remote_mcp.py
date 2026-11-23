@@ -47,6 +47,10 @@ What this module adds around the SDK:
   GET and no session to end on DELETE; both answer 405, as the spec allows.
   A browser's GET (``Accept`` names ``text/html`` and no event stream) gets
   the same 405 as a short page for a person (``keypages.py``).
+* **Client name.** An ``initialize`` carries ``clientInfo``. Its name and
+  version, cleaned to a few safe characters (``logs.clean_name``), are left
+  in the request's state for the app's request log line. The body is only
+  watched as the SDK reads it; nothing in any response changes.
 * **One capture path.** The tool calls the app's ``capture_for_key``, the
   function behind ``/v1/screenshot``: the same plan check, parameter limits,
   SSRF policy, quota, refund of failed captures, and logging.
@@ -70,6 +74,7 @@ from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
 from . import __version__
+from .logs import MCP_CLIENT_MAX, MCP_CLIENT_VERSION_MAX, clean_name
 from .params import MAX_HEIGHT, MAX_WIDTH, MIN_SIDE
 
 log = logging.getLogger("calotype.mcp")
@@ -77,6 +82,12 @@ log = logging.getLogger("calotype.mcp")
 # Where the key that passed the HTTP check is left for the tool, in the
 # request's state (shared by every Request object made from one ASGI scope).
 _KEY_STATE = "calotype_key"
+
+# Where an initialize's client name and version are left for the app's request log line.
+_CLIENT_STATE = "mcp_client"
+# The most of a body kept to read an initialize's clientInfo. MCP requests are small;
+# a bigger body is passed on unread.
+_MAX_PEEK_BYTES = 64 * 1024
 
 # JSON-RPC's range for errors an implementation defines itself.
 _UNAUTHORIZED = -32001
@@ -293,7 +304,7 @@ class RemoteMCP:
         if self._manager is None:
             await _rpc_error(503, -32603, "The MCP server is starting. Retry shortly.", "busy")(scope, receive, send)
             return
-        await self._manager.handle_request(scope, receive, send)
+        await self._manager.handle_request(scope, _noting_client(receive, request), send)
 
 
     def _www_authenticate(self, request: Request, error: str | None) -> str:
@@ -316,6 +327,53 @@ def _tool_call_id(body: bytes) -> Any:
             ident = message.get("id")
             return ident if isinstance(ident, (str, int)) and not isinstance(ident, bool) else None
     return _NO_CALL
+
+
+def _client_info(body: bytes) -> tuple[str | None, str | None] | None:
+    """``(name, version)`` from the ``clientInfo`` of an ``initialize`` in ``body``, cleaned for the log.
+
+    ``None`` when the body holds no ``initialize``; each of the two is ``None`` when absent or not a string.
+    """
+    import json
+
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        return None
+    for message in data if isinstance(data, list) else [data]:
+        if isinstance(message, dict) and message.get("method") == "initialize":
+            params = message.get("params")
+            info = params.get("clientInfo") if isinstance(params, dict) else None
+            info = info if isinstance(info, dict) else {}
+            return clean_name(info.get("name"), MCP_CLIENT_MAX), clean_name(info.get("version"), MCP_CLIENT_VERSION_MAX)
+    return None
+
+
+def _noting_client(receive: Receive, request: Request) -> Receive:
+    """An ASGI ``receive`` that passes the body on untouched and, once the SDK has read all of it,
+    leaves an ``initialize``'s client name and version in the request's state. Never fails the request."""
+    body = bytearray()
+    done = False
+
+    async def noting() -> dict:
+        nonlocal done
+        message = await receive()
+        if done or message.get("type") != "http.request":
+            return message
+        try:
+            if len(body) <= _MAX_PEEK_BYTES:
+                body.extend(message.get("body", b""))
+            if not message.get("more_body"):
+                done = True
+                info = _client_info(bytes(body)) if len(body) <= _MAX_PEEK_BYTES else None
+                if info is not None:
+                    setattr(request.state, _CLIENT_STATE, info)
+        except Exception:
+            done = True
+            log.warning("could not read the client's name", exc_info=True)
+        return message
+
+    return noting
 
 
 def _replay(body: bytes, receive: Receive) -> Receive:

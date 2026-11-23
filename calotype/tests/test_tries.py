@@ -288,7 +288,8 @@ def test_counts_hold_no_url_host_or_ip(make_client, store):
 def test_one_log_line_per_try_with_scheme_and_host_only(behind_proxy, caplog):
     caplog.set_level(logging.INFO)
     c = behind_proxy
-    ip = {"X-Forwarded-For": "198.51.100.77"}
+    # A named User-Agent, so "testclient" below can only be the test client's address.
+    ip = {"X-Forwarded-For": "198.51.100.77", "User-Agent": "SomeBrowser/9 (probe-7c1d)"}
     try_url(c, "https://public.example/secret-path?token=s3cret", **ip)
     try_url(c, "http://127.0.0.1/admin", **ip)
     tries = [r for r in caplog.records if r.name == "calotype.try" and r.getMessage() == "try"]
@@ -299,8 +300,9 @@ def test_one_log_line_per_try_with_scheme_and_host_only(behind_proxy, caplog):
     assert tries[0].fields["format"] == "jpeg" and tries[0].fields["bytes"] > 0
     requests = [r.fields for r in caplog.records if r.getMessage() == "request" and r.fields["path"] == "/try"]
     assert len(requests) == 2 and requests[0]["key_id"] is None
+    assert (requests[0]["agent"], requests[0]["agent_kind"]) == ("somebrowser", "tool")
     text = "\n".join(f"{r.getMessage()} {getattr(r, 'fields', '')}" for r in caplog.records if r.name.startswith("calotype"))
-    for leak in ("secret-path", "s3cret", "/admin", "198.51.100.77", "testclient"):
+    for leak in ("secret-path", "s3cret", "/admin", "198.51.100.77", "testclient", "probe-7c1d", "SomeBrowser"):
         assert leak not in text, leak
 
 

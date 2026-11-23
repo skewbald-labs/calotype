@@ -39,7 +39,7 @@ from .credits import MIN_CARD_CENTS
 from .credits import UNAVAILABLE_MESSAGE as CREDITS_UNAVAILABLE_MESSAGE
 from .credits import CreditsProvider, PaymentRefused, PaymentUnconfirmed, credits_from_env
 from .keypages import BrowserPages, add_key_routes
-from .logs import log_event, setup_logging
+from .logs import client_software, log_event, setup_logging
 from .oauth import OAuthServer, add_oauth_routes, oauth_enabled
 from .notices import mask_email, normalize_email, notices_enabled, thresholds_at, token_key_id, token_matches
 from .params import ScreenshotParams
@@ -262,6 +262,8 @@ def create_app(
         request.state.request_id = uuid.uuid4().hex[:16]
         request.state.key_id = None
         request.state.target = None
+        # Set by remote_mcp.py for an MCP initialize: (name, version) as the client reports them.
+        request.state.mcp_client = None
         status = 500
         try:
             response = await call_next(request)
@@ -270,6 +272,9 @@ def create_app(
             return response
         finally:
             # Path only: the query string can carry access_key and the target URL.
+            # The software's name and kind only (logs.client_software), never the User-Agent itself.
+            agent, agent_kind = client_software(request.headers.get("user-agent"))
+            mcp_client = request.state.mcp_client
             log_event(
                 log,
                 "request",
@@ -280,6 +285,9 @@ def create_app(
                 duration_ms=int((time.monotonic() - started) * 1000),
                 key_id=request.state.key_id,
                 target=request.state.target,
+                agent=agent,
+                agent_kind=agent_kind,
+                **({"mcp_client": mcp_client[0], "mcp_client_version": mcp_client[1]} if mcp_client else {}),
             )
 
     async def authenticate(request: Request, *, allow_query: bool = True, payment_ok: bool = False) -> ApiKey:

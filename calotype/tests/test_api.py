@@ -255,6 +255,168 @@ def test_logs_have_no_key_or_query(client, free_key, caplog):
     assert "https://example.com" in text
 
 
+CHROME = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+GOOGLEBOT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+CLAUDE_USER = (
+    "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-User/1.0; +Claude-User@anthropic.com)"
+)
+
+
+@pytest.mark.parametrize(
+    ("header", "agent", "kind"),
+    [
+        # No header, or nothing in it.
+        (None, None, "none"),
+        ("", None, "none"),
+        ("  \t ", None, "none"),
+        # Browsers.
+        (CHROME, "mozilla", "browser"),
+        ("mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0", "mozilla", "browser"),
+        # Tools: HTTP libraries, command lines, MCP clients.
+        ("curl/8.5.0", "curl", "tool"),
+        ("python-httpx/0.28.1", "python-httpx", "tool"),
+        ("node", "node", "tool"),
+        ("Claude-User/1.0", "claude-user", "tool"),
+        ("node-fetch/1.0 (+https://github.com/bitinn/node-fetch)", "node-fetch", "tool"),
+        ("Go-http-client/2.0", "go-http-client", "tool"),
+        ("n8n", "n8n", "tool"),
+        ("  Wget/1.21", "wget", "tool"),
+        ("PostmanRuntime/7.43.0", "postmanruntime", "tool"),
+        ("Mozilla", "mozilla", "tool"),  # not "Mozilla/": no browser sends this
+        # Bots: a marker anywhere in the header, in any case.
+        (GOOGLEBOT, "mozilla", "bot"),
+        (CLAUDE_USER, "mozilla", "bot"),
+        (CHROME.replace("Chrome/", "HeadlessChrome/"), "mozilla", "bot"),
+        ("Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)", "slackbot-linkexpanding", "bot"),
+        ("facebookexternalhit/1.1", "facebookexternalhit", "bot"),
+        ("UptimeRobot/2.0", "uptimerobot", "bot"),
+        ("Example-CRAWLER/3", "example-crawler", "bot"),
+        ("Site Monitor 2", "site", "bot"),
+        ("FeedFetcher-Google; (+http://www.google.com/feedfetcher.html)", "feedfetcher-google", "bot"),
+        ("Nmap Scripting Engine; scanner", "nmap", "bot"),
+        ("link-preview/1", "link-preview", "bot"),
+        # Hostile input: control characters, JSON-breaking characters, non-ASCII, very long values, a key.
+        ('cu"rl\\{}\x00\x1b[31m/1 "}],\n{"severity":"ERROR"', "curl31m", "tool"),
+        ('"},{"agent":"x"}', "agentx", "tool"),
+        ("\x00\x01\x02", None, "tool"),
+        ("/1.0", None, "tool"),
+        ("---/1.0", None, "tool"),
+        ("Čtečka-Ünï/2 ☃", "teka-n", "tool"),
+        ("日本語ブラウザ/1.0", None, "tool"),
+        ("A" * 100_000, "a" * 32, "tool"),
+        ("x" * 100_000 + " bot", "x" * 32, "bot"),
+        ("<script>alert(1)</script>", "scriptalert1", "tool"),
+        ("cal_abcdefghijklmnop/1", None, "tool"),
+        ("../../etc/passwd", None, "tool"),
+        ("..%2f..%2fetc%2fpasswd", "..2f..2fetc2fpasswd", "tool"),
+    ],
+)
+def test_client_software_names_the_sender_and_nothing_else(header, agent, kind):
+    import json
+    import re
+
+    from calotype.logs import AGENT_MAX, client_software
+
+    got = client_software(header)
+    assert got == (agent, kind)
+    assert got[0] is None or (re.fullmatch(r"[a-z0-9._-]+", got[0]) and len(got[0]) <= AGENT_MAX)
+    # Nothing in the value needs escaping, so it cannot break out of its JSON field.
+    assert json.dumps(got[0]) in ("null", f'"{got[0]}"')
+
+
+@pytest.mark.parametrize(
+    ("value", "limit", "cleaned"),
+    [
+        ("claude-ai", 40, "claude-ai"),
+        ("Claude Code", 40, "claude-code"),
+        ("Visual Studio Code", 40, "visual-studio-code"),
+        ("  Cursor  (1.2) ", 40, "cursor-1.2"),
+        ("mcp-remote - fallback", 40, "mcp-remote-fallback"),
+        ("my_client.v2", 40, "my_client.v2"),
+        ("1.0.0", 20, "1.0.0"),
+        ("0.3.1 (beta) build 2026-11-23T10:00:00Z", 20, "0.3.1-beta-build-202"),
+        ("n" * 500, 40, "n" * 40),
+        ("Ünï cödé ☃ client", 40, "n-cd--client"),
+        ('x"}\n{"severity":"CRITICAL","message":"owned', 40, "x-severitycriticalmessageowned"),
+        ("a\x00b\r\nc\x1b[0m", 40, "ab-c0m"),
+        ("", 40, None),
+        ("   ", 40, None),
+        ("--..__", 40, None),
+        ("☃☃☃", 40, None),
+        ("cal_abcdefghijklmnop", 40, None),
+        ("agent for cal_abcdefghijklmnop", 40, None),
+        (None, 40, None),
+        (7, 40, None),
+        (1.5, 20, None),
+        (True, 20, None),
+        (["claude"], 40, None),
+        ({"name": "claude"}, 40, None),
+    ],
+)
+def test_clean_name(value, limit, cleaned):
+    from calotype.logs import clean_name
+
+    assert clean_name(value, limit) == cleaned
+
+
+def request_lines(caplog, path: str) -> list[dict]:
+    return [r.fields for r in caplog.records if r.getMessage() == "request" and r.fields["path"] == path]
+
+
+def test_request_lines_name_the_software_and_never_the_user_agent(client, free_key, caplog):
+    caplog.set_level(logging.INFO)
+    agents = [CHROME, "curl/8.5.0", GOOGLEBOT, 'Evil"\x1b}/1 probe-7c1d (secret-detail; jane@example.org)']
+    for ua in agents:
+        assert client.get("/health", headers={"User-Agent": ua}).status_code == 200
+    client.get("/v1/screenshot", params={"url": "https://example.com"}, headers={**auth(free_key), "User-Agent": "curl/8.5.0"})
+    lines = request_lines(caplog, "/health")
+    assert [(l["agent"], l["agent_kind"]) for l in lines] == [
+        ("mozilla", "browser"),
+        ("curl", "tool"),
+        ("mozilla", "bot"),
+        ("evil", "tool"),
+    ]
+    # The fields of a request line: the old seven and the two new ones, on every request.
+    assert set(lines[0]) == {
+        "request_id", "method", "path", "status", "duration_ms", "key_id", "target", "agent", "agent_kind",
+    }
+    shot = request_lines(caplog, "/v1/screenshot")[-1]
+    assert (shot["agent"], shot["agent_kind"], shot["status"]) == ("curl", "tool", 200) and shot["key_id"] is not None
+    text = "\n".join(f"{r.getMessage()} {getattr(r, 'fields', '')}" for r in caplog.records)
+    for leak in ("AppleWebKit", "Chrome/141", "8.5.0", "Googlebot", "google.com", "probe-7c1d", "secret-detail", "jane@"):
+        assert leak not in text, leak
+
+
+def test_a_request_with_no_user_agent_is_logged_as_none(client, caplog):
+    caplog.set_level(logging.INFO)
+    # httpx sends its own User-Agent unless the header is removed from the client.
+    del client.headers["user-agent"]
+    assert client.get("/health").status_code == 200
+    line = request_lines(caplog, "/health")[-1]
+    assert line["agent"] is None and line["agent_kind"] == "none"
+
+
+def test_the_json_log_line_carries_the_new_fields(client, capsys):
+    import json
+
+    from calotype.logs import JsonFormatter
+
+    handler = logging.StreamHandler()  # writes to the stderr that capsys holds
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger("calotype")
+    root.addHandler(handler)
+    old_level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        client.get("/health", headers={"User-Agent": 'cu"rl\\/8 "}{'})
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
+    lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")]
+    line = [l for l in lines if l["message"] == "request" and l["path"] == "/health"][-1]
+    assert line["agent"] == "curl" and line["agent_kind"] == "tool" and line["status"] == 200
+
+
 def test_log_redaction():
     from calotype.logs import redact
 

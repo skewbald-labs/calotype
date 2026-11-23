@@ -296,6 +296,140 @@ def test_logs_name_the_key_by_id_only(client, free_key, store, caplog):
     assert free_key not in text and "secret/path" not in text
 
 
+def mcp_lines(caplog) -> list[dict]:
+    return [r.fields for r in caplog.records if r.getMessage() == "request" and r.fields["path"] == "/mcp"]
+
+
+def initialize(client, key, client_info, **extra):
+    params = {"protocolVersion": "2025-11-25", "capabilities": {}}
+    if client_info is not None:
+        params["clientInfo"] = client_info
+    return rpc(client, key, "initialize", params, version=None, **extra)
+
+
+def test_an_initialize_logs_the_clients_own_name_and_version(client, free_key, caplog):
+    caplog.set_level("INFO")
+    r = initialize(client, None, {"name": "Claude Code", "version": "2.1.0 (beta)"}, **{"User-Agent": "claude-code/2.1.0 (cli)"})
+    assert tool_result(r)["serverInfo"]["name"] == "calotype"
+    line = mcp_lines(caplog)[-1]
+    assert (line["mcp_client"], line["mcp_client_version"]) == ("claude-code", "2.1.0-beta")
+    assert (line["agent"], line["agent_kind"], line["status"], line["key_id"]) == ("claude-code", "tool", 200, None)
+    # The same with a key: the body goes to the SDK by another path.
+    tool_result(initialize(client, free_key, {"name": "cursor-vscode", "version": "1.0.0"}))
+    line = mcp_lines(caplog)[-1]
+    assert (line["mcp_client"], line["mcp_client_version"]) == ("cursor-vscode", "1.0.0") and line["key_id"] is not None
+
+
+def test_no_other_mcp_request_carries_a_client_name(client, free_key, caplog):
+    caplog.set_level("INFO")
+    assert rpc(client, None, "tools/list").status_code == 200
+    assert rpc(client, free_key, "ping").status_code == 200
+    tool_result(call(client, free_key, {"url": "https://example.com"}))
+    note = client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=headers(free_key))
+    assert note.status_code == 202
+    # The 2026 envelope has no initialize; its per-request clientInfo is not logged.
+    meta = {**MODERN_META, "io.modelcontextprotocol/clientInfo": {"name": "modern-client", "version": "9"}}
+    assert rpc(client, free_key, "tools/list", {"_meta": meta}, version=MODERN, **{"Mcp-Method": "tools/list"}).status_code == 200
+    assert client.get("/mcp", headers=headers(free_key)).status_code == 405
+    lines = mcp_lines(caplog)
+    assert len(lines) == 6
+    for line in lines:
+        assert "mcp_client" not in line and "mcp_client_version" not in line
+        assert line["agent"] == "testclient" and line["agent_kind"] == "tool"
+    assert "modern-client" not in str(lines)
+
+
+@pytest.mark.parametrize(
+    ("client_info", "expected"),
+    [
+        (None, (None, None)),
+        ("claude", (None, None)),
+        ([], (None, None)),
+        ({}, (None, None)),
+        ({"name": 7, "version": 1.5}, (None, None)),
+        ({"name": None, "version": ["1"]}, (None, None)),
+        ({"name": "mcp-inspector"}, ("mcp-inspector", None)),
+        ({"version": "0.1"}, (None, "0.1")),
+        ({"name": "N" * 500, "version": "9" * 500}, ("n" * 40, "9" * 20)),
+        ({"name": 'x"}\n{"severity":"CRITICAL"', "version": "1\x00\x1b[0m;rm -rf /"}, ("x-severitycritical", "10mrm-rf-")),
+        ({"name": "Čtečka ☃", "version": "١٢٣"}, ("teka-", None)),
+        ({"name": "cal_abcdefghijklmnop", "version": "1"}, (None, "1")),
+    ],
+)
+def test_client_names_are_cleaned_and_odd_ones_are_null(client, caplog, client_info, expected):
+    caplog.set_level("INFO")
+    # Whatever the SDK makes of the handshake (it refuses some of these), the line is written and holds only clean values.
+    r = initialize(client, None, client_info)
+    assert r.status_code in (200, 400), r.text
+    line = mcp_lines(caplog)[-1]
+    assert (line["mcp_client"], line["mcp_client_version"]) == expected
+    assert line["status"] == r.status_code
+
+
+def test_client_info_is_read_from_an_initialize_only():
+    from calotype.remote_mcp import _client_info
+
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "A B", "version": "1"}}}
+    assert _client_info(json.dumps(init).encode()) == ("a-b", "1")
+    assert _client_info(json.dumps([{"jsonrpc": "2.0", "method": "ping", "id": 0}, init]).encode()) == ("a-b", "1")
+    assert _client_info(json.dumps({**init, "params": None}).encode()) == (None, None)
+    assert _client_info(json.dumps({**init, "params": [1]}).encode()) == (None, None)
+    for body in (
+        b"",
+        b"not json",
+        b"\xff\xfe",
+        b"null",
+        b"7",
+        b'"initialize"',
+        b"[]",
+        b"[1, null]",
+        b"[" * 50_000,
+        json.dumps({**init, "method": "tools/list"}).encode(),
+        json.dumps({**init, "method": ["initialize"]}).encode(),
+        json.dumps({"result": {"clientInfo": {"name": "x"}}}).encode(),
+    ):
+        assert _client_info(body) is None, body[:40]
+
+
+def test_a_body_too_big_to_peek_at_is_passed_on_unread(client, caplog):
+    caplog.set_level("INFO")
+    r = initialize(client, None, {"name": "big-client", "version": "1", "padding": "p" * 70_000})
+    assert tool_result(r)["serverInfo"]["name"] == "calotype"  # the SDK still answers
+    line = mcp_lines(caplog)[-1]
+    assert "mcp_client" not in line and line["status"] == 200
+
+
+@pytest.fixture
+def oauth_client(settings, store, fake_renderer):
+    """A client with OAuth on. Made before the test runs, so caplog sees its logs."""
+    app = create_app(
+        replace(settings, oauth_secret="s" * 40),
+        policy=AddressPolicy(resolver=fake_resolver), storage=store, renderer=fake_renderer,
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+def test_with_oauth_on_a_keyless_initialize_still_names_its_client(oauth_client, caplog):
+    # With OAuth on, this module reads a keyless body itself (to answer a tools/call with 401) and replays it.
+    caplog.set_level("INFO")
+    r = initialize(oauth_client, None, {"name": "ChatGPT", "version": "1"}, **{"User-Agent": "openai-mcp/1.0.0"})
+    assert tool_result(r)["serverInfo"]["name"] == "calotype"
+    line = mcp_lines(caplog)[-1]
+    assert (line["mcp_client"], line["mcp_client_version"], line["agent"]) == ("chatgpt", "1", "openai-mcp")
+    assert call(oauth_client, None, {"url": "https://example.com"}).status_code == 401
+    line = mcp_lines(caplog)[-1]
+    assert "mcp_client" not in line and line["status"] == 401
+
+
+def test_a_refused_request_is_logged_without_reading_its_body(client, caplog):
+    caplog.set_level("INFO")
+    r = initialize(client, "cal_wrong_9d2e", {"name": "refused-client", "version": "1"})
+    assert r.status_code == 401
+    line = mcp_lines(caplog)[-1]
+    assert "mcp_client" not in line and line["status"] == 401 and line["agent"] == "testclient"
+
+
 # --- the ?ref= source tag on the endpoint URL -----------------------------------------------
 
 
