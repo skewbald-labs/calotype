@@ -283,6 +283,17 @@ def test_foreign_origin_is_refused(client, free_key):
     assert tool_result(rpc(client, free_key, "ping", Origin="https://calotype.dev")) == {}
 
 
+@pytest.mark.parametrize("origin", ["https://claude.ai", "https://claude.com", "https://chatgpt.com", "https://chat.openai.com/"])
+def test_the_web_apps_of_known_mcp_clients_may_name_themselves_in_origin(client, free_key, origin):
+    # Claude and ChatGPT connect from their own servers and may send their web app's Origin.
+    assert tool_result(rpc(client, free_key, "ping", Origin=origin)) == {}
+
+
+@pytest.mark.parametrize("origin", ["https://claude.ai.evil.example", "http://claude.ai", "https://evil.example/https://claude.ai", "null"])
+def test_look_alike_origins_are_still_refused(client, free_key, origin):
+    assert rpc(client, free_key, "ping", Origin=origin).status_code == 403
+
+
 def test_logs_name_the_key_by_id_only(client, free_key, store, caplog):
     caplog.set_level("INFO")
     tool_result(call(client, free_key, {"url": "https://example.com/secret/path?q=1"}))

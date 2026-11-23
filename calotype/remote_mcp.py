@@ -35,8 +35,13 @@ What this module adds around the SDK:
   ``initialize``, ``tools/list`` and ``ping`` still work with no key.
   ``CALOTYPE_MCP_KEYLESS_CALL=result`` keeps the old tool error instead.
 * **Origin.** The transport spec says a server must refuse a request whose
-  ``Origin`` header is present and not allowed. Only the site's own origin is
-  allowed; programs that are not browsers send no ``Origin``. The ``Host``
+  ``Origin`` header is present and not allowed. Allowed are the site's own
+  origin and the web apps of the MCP clients that connect from their own
+  servers and may name themselves in ``Origin`` (``CLIENT_ORIGINS``:
+  Claude and ChatGPT; Anthropic's connector docs warn that strict Origin
+  checks reject its requests). Programs that are not browsers send no
+  ``Origin``. No cookie or other ambient credential exists here, so an
+  allowed origin gains nothing a key holder does not already have. The ``Host``
   check of the SDK's DNS-rebinding protection is off: it guards servers on
   localhost, while this one is public and every request needs a key.
 * **Source tag.** A ``?ref=<tag>`` on the endpoint URL (each listing's
@@ -90,6 +95,11 @@ _CLIENT_STATE = "mcp_client"
 _MAX_PEEK_BYTES = 64 * 1024
 
 # JSON-RPC's range for errors an implementation defines itself.
+# Web apps of MCP clients whose requests may carry their own Origin (see "Origin" above).
+CLIENT_ORIGINS = frozenset(
+    {"https://claude.ai", "https://claude.com", "https://chatgpt.com", "https://chat.openai.com"}
+)
+
 _UNAUTHORIZED = -32001
 _FORBIDDEN = -32003
 
@@ -245,7 +255,7 @@ class RemoteMCP:
         """The ASGI app for ``/mcp``: check the origin and the key, then hand the request to the SDK."""
         request = Request(scope, receive)
         origin = request.headers.get("origin")
-        if origin and origin.rstrip("/") != self.site_origin:
+        if origin and origin.rstrip("/") != self.site_origin and origin.rstrip("/").lower() not in CLIENT_ORIGINS:
             await _rpc_error(403, _FORBIDDEN, "This origin may not call the MCP endpoint.", "forbidden_origin")(
                 scope, receive, send
             )
