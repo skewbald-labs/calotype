@@ -61,6 +61,28 @@ class CaptureResult:
     final_url: str | None = None
 
 
+# The scroll pass before a full-page capture (Renderer._scroll_through).
+SCROLL_PAUSE_MS = 120  # at each screen, long enough for an observer to fire and a section to mount
+SCROLL_BUDGET_S = 6.0  # the whole pass, however tall the page
+SCROLL_IDLE_S = 2.0  # then up to this long for lazily loaded images
+SCROLL_RESERVE_S = 6.0  # time always left for the screenshot itself
+_SCROLL_THROUGH_JS = """async ({step, pause, maxY, budget}) => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const height = () => Math.max(document.documentElement ? document.documentElement.scrollHeight : 0,
+                                document.body ? document.body.scrollHeight : 0);
+  const end = performance.now() + budget;
+  let y = 0;
+  while (y < Math.min(maxY, height()) && performance.now() < end) {
+    window.scrollTo(0, y);
+    await sleep(pause);
+    y += step;
+  }
+  if (performance.now() < end) { window.scrollTo(0, Math.min(maxY, height())); await sleep(pause); }
+  window.scrollTo(0, 0);
+  await sleep(pause);
+}"""
+
+
 def load_blocklist(path: Path) -> frozenset[str]:
     try:
         lines = Path(path).read_text().splitlines()
@@ -158,6 +180,9 @@ class Renderer:
                 viewport={"width": params.width, "height": params.height},
                 device_scale_factor=params.device_scale_factor,
                 color_scheme="dark" if params.dark_mode else "light",
+                # A full-page capture asks the page for reduced motion: sections that fade or
+                # slide in on scroll are then shown at rest instead of caught mid-way or hidden.
+                reduced_motion="reduce" if params.full_page else "no-preference",
                 proxy={"server": session.proxy_url, "bypass": "<-loopback>"},
                 service_workers="block",
                 accept_downloads=False,
@@ -233,6 +258,8 @@ class Renderer:
             if params.delay_ms:
                 await asyncio.sleep(params.delay_ms / 1000)
 
+            if params.full_page:
+                await self._scroll_through(page, params, deadline)
             page_height = await self._page_height(page)
             image = await self._screenshot(page, params, page_height)
             return CaptureResult(
@@ -286,6 +313,33 @@ class Renderer:
             port = parts.port or (443 if parts.scheme == "https" else 80)
             return not self.policy.ip_allowed(literal, port)
         return is_blocked_hostname(host)
+
+    async def _scroll_through(self, page, params: ScreenshotParams, deadline: float) -> None:
+        """Before a full-page capture, scroll down the page one screen at a time and back to the top.
+
+        Many pages mount or reveal a section only when it scrolls into view, and load images
+        lazily; captured without scrolling, those parts of a full-page image are blank. The
+        pass is bounded: it stops at the full-page height cap (a page that grows as it is
+        scrolled cannot run on), keeps to a few seconds, and leaves time for the capture
+        itself. Best effort: a page that breaks the script is captured as it stands.
+        """
+        left = deadline - time.monotonic() - SCROLL_RESERVE_S
+        if left <= 0.5:
+            return
+        budget_ms = int(min(SCROLL_BUDGET_S, left) * 1000)
+        try:
+            await page.evaluate(
+                _SCROLL_THROUGH_JS,
+                {"step": params.height, "pause": SCROLL_PAUSE_MS, "maxY": params.full_page_height_cap(), "budget": budget_ms},
+            )
+            idle_ms = int(min(SCROLL_IDLE_S, max(0.0, deadline - time.monotonic() - SCROLL_RESERVE_S)) * 1000)
+            if idle_ms > 0:
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=idle_ms)  # lazy images
+                except (PlaywrightError, asyncio.TimeoutError):
+                    pass
+        except (PlaywrightError, asyncio.TimeoutError):
+            pass
 
     async def _page_height(self, page) -> int | None:
         """The height of the whole scrolling page in CSS pixels, or None when the page will not say."""

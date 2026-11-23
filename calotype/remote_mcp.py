@@ -200,7 +200,7 @@ class RemoteMCP:
         ],
         ctx: Context,
         full_page: Annotated[
-            bool, Field(description="Capture the whole scrolling page (up to 20,000 px tall) instead of the viewport.")
+            bool, Field(description="Capture the whole scrolling page (up to 20,000 px tall) instead of the viewport. The page is scrolled through first, so sections that appear on scroll are shown.")
         ] = False,
         width: Annotated[int, Field(ge=MIN_SIDE, le=MAX_WIDTH, description="Viewport width in CSS pixels.")] = 1280,
         height: Annotated[int, Field(ge=MIN_SIDE, le=MAX_HEIGHT, description="Viewport height in CSS pixels.")] = 800,

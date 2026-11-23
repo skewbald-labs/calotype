@@ -102,7 +102,7 @@ Each test writes under its own collection prefix and deletes it afterwards.
 |---|---|---|
 | `url` | required | http or https, public address, up to 2,048 characters, no `user:pass@` |
 | `width`, `height` | 1280, 800 | 100 to 3840, 100 to 2160 |
-| `full_page` | false | captures up to 20,000 px tall (WebP: 16,383 px, a format limit), and at most 80 megapixels |
+| `full_page` | false | captures up to 20,000 px tall (WebP: 16,383 px, a format limit), and at most 80 megapixels. The page is first scrolled through one screen at a time (a few seconds at most) with reduced motion requested, so sections revealed on scroll and lazy images are drawn |
 | `format` | png | png, jpeg (or jpg), webp |
 | `quality` | 80 | 1 to 100, jpeg and webp only |
 | `device_scale_factor` | 1 | 1 to 3 |

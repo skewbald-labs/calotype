@@ -46,6 +46,20 @@ def site(canary):
             "<body><h1>Calotype test page</h1></body></html>"
         ),
         "/tall": html("<!doctype html><body style='margin:0'><div style='height:30000px;background:#0f0'></div></body>"),
+        # Sections that stay invisible until they scroll into view, as many marketing pages do.
+        "/reveal": html(
+            "<!doctype html><style>body{margin:0;background:#fff}"
+            ".s{height:900px;opacity:0;transition:opacity 2s;background:#00f}.s.in{opacity:1}</style>"
+            "<body><div style='height:900px'></div><div class='s'></div><div class='s'></div><div class='s'></div>"
+            "<script>const o=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting)e.target.classList.add('in')}),"
+            "{threshold:0.1});document.querySelectorAll('.s').forEach(e=>o.observe(e));</script></body>"
+        ),
+        # A page that grows every time it is scrolled: the scroll pass must not run on.
+        "/endless": html(
+            "<!doctype html><body style='margin:0;background:#fff'><div style='height:1200px'></div>"
+            "<script>addEventListener('scroll',()=>{const d=document.createElement('div');"
+            "d.style.height='1500px';document.body.appendChild(d)});</script></body>"
+        ),
         # A page that tries to reach loopback every way a page can.
         "/ssrf": html(
             f"""<!doctype html><body style="background:#fff">
@@ -242,3 +256,29 @@ def test_end_to_end_try_returns_an_inline_jpeg_and_keeps_the_policy(make_client,
     r = client.post("/try", data={"url": site.url("/redirect")})
     assert r.status_code == 422 and "<img" not in r.text
     assert canary.hits == []
+
+
+def test_a_full_page_capture_scrolls_through_first_so_revealed_sections_show(make_client, site, free_key):
+    client = make_client()
+    r = client.get(
+        "/v1/screenshot",
+        params={"url": site.url("/reveal"), "width": 320, "height": 200, "full_page": "true"},
+        headers=auth(free_key),
+    )
+    assert r.status_code == 200, r.text
+    img = Image.open(io.BytesIO(r.content)).convert("RGB")
+    assert img.size == (320, 3600)
+    # Every revealed section is drawn, down to the last one; unscrolled they would be white.
+    for y in (1000, 2300, 3500):
+        assert img.getpixel((160, y)) == (0, 0, 255), y
+    assert img.getpixel((160, 100)) == (255, 255, 255)  # and the capture starts at the top again
+
+    # A page that grows on every scroll still finishes, inside the height cap.
+    r = client.get(
+        "/v1/screenshot",
+        params={"url": site.url("/endless"), "width": 320, "height": 200, "full_page": "true", "format": "jpeg"},
+        headers=auth(free_key),
+    )
+    assert r.status_code == 200, r.text
+    assert Image.open(io.BytesIO(r.content)).size[1] <= 20000
+    assert int(r.headers["x-calotype-duration-ms"]) < 20000

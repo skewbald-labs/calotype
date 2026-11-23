@@ -82,7 +82,7 @@
       <tr><td><code>url</code></td><td>required</td><td>The page to capture. <code>http</code> or <code>https</code> only, on a public address, at most 2,048 characters. Ports 80, 443 and 1024 and up. No <code>user:password@</code> in the address.</td></tr>
       <tr><td><code>width</code></td><td>1280</td><td>Viewport width in CSS pixels, 100 to 3840.</td></tr>
       <tr><td><code>height</code></td><td>800</td><td>Viewport height in CSS pixels, 100 to 2160.</td></tr>
-      <tr><td><code>full_page</code></td><td>false</td><td>Capture the whole scrolling page instead of the viewport (the first screen). See the height cap below.</td></tr>
+      <tr><td><code>full_page</code></td><td>false</td><td>Capture the whole scrolling page instead of the viewport (the first screen). Calotype first scrolls down the page one screen at a time and asks it for reduced motion, so sections that appear on scroll and lazily loaded images are in the image. See the height cap below.</td></tr>
       <tr><td><code>format</code></td><td>png</td><td><code>png</code>, <code>jpeg</code> or <code>webp</code>. <code>jpg</code> is accepted as <code>jpeg</code>.</td></tr>
       <tr><td><code>quality</code></td><td>80</td><td>1 to 100, for <code>jpeg</code> and <code>webp</code> only. Sending it with <code>png</code> is an error.</td></tr>
       <tr><td><code>device_scale_factor</code></td><td>1</td><td>1 to 3, decimals allowed. Use 2 for sharp images on high-density screens.</td></tr>

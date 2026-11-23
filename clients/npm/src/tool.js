@@ -31,7 +31,7 @@ export const SCREENSHOT_TOOL = {
       full_page: {
         type: 'boolean',
         title: 'Full Page',
-        description: 'Capture the whole scrolling page (up to 20,000 px tall) instead of the viewport.',
+        description: 'Capture the whole scrolling page (up to 20,000 px tall) instead of the viewport. The page is scrolled through first, so sections that appear on scroll are shown.',
         default: false,
       },
       width: {
