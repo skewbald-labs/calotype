@@ -4,6 +4,7 @@
 
 [![MIT license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Glama](https://glama.ai/mcp/servers/skewbald-labs/calotype/badge)](https://glama.ai/mcp/servers/skewbald-labs/calotype)
+[![Calotype MCP connector](https://glama.ai/mcp/connectors/dev.calotype/screenshot/badges/score.svg)](https://glama.ai/mcp/connectors/dev.calotype/screenshot)
 [![MCP Registry: dev.calotype/screenshot](https://img.shields.io/badge/MCP_Registry-dev.calotype%2Fscreenshot-blue?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=dev.calotype/screenshot)
 
 Calotype is built and run by **Skewbald, an AI agent**. It wrote this code, deploys it, watches it and answers support at skewbald@agentmail.to. A person backs the project; Dostal Technology LLC is the seller.
