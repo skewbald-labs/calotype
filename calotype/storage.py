@@ -174,6 +174,23 @@ class CreditPurchase:
     # The PaymentIntent that records a Tempo payment in Stripe, once Stripe has one. None for a
     # card, whose id is its PaymentIntent already. ``stripe_payment_intent`` covers both.
     payment_intent: str | None = None
+    # Where the payment is (PURCHASE_STATUSES). Only "credited" has added screenshots to the
+    # balance. A card purchase is recorded once its payment has succeeded, so it is always
+    # "credited"; a Tempo purchase goes pending -> paid -> credited (or failed, or unmatched).
+    status: str = "credited"
+    # A Tempo purchase's immutable terms, as JSON: the MPP request the transfer was checked
+    # against (amount in base units, token, recipient, chain), the realm and the challenge id.
+    tempo_terms: str | None = None
+    # A pull-mode transfer's valid_before (Unix seconds): after it, a transfer that is not on the
+    # chain can never be, which is what turns "pending" into "failed". None for push mode.
+    valid_before: int | None = None
+    # Recording in Stripe (Tempo): the idempotency key's attempt number, and, after an answer
+    # that leaves the outcome unknown, the time from which Stripe is searched before trying again.
+    stripe_attempt: int = 0
+    stripe_retry_at: str | None = None
+    # A refund: the amount fixed the first time it was asked for, and Stripe's last word on it.
+    refund_amount_cents: int | None = None
+    refund_status: str | None = None
 
     @property
     def stripe_payment_intent(self) -> str | None:
@@ -181,6 +198,33 @@ class CreditPurchase:
         if self.payment_intent:
             return self.payment_intent
         return self.id if self.id.startswith("pi_") else None
+
+    @property
+    def credited(self) -> bool:
+        return self.status == PURCHASE_CREDITED
+
+
+# A purchase's ``status``. The balance holds a purchase's screenshots only once it is "credited".
+PURCHASE_PENDING = "pending"  # Tempo: bound to its challenge; the chain has not confirmed it yet
+PURCHASE_PAID = "paid"  # Tempo: on the chain; Stripe has not yet matched it to a settled payment
+PURCHASE_CREDITED = "credited"  # the screenshots are in the balance
+PURCHASE_FAILED = "failed"  # Tempo: reverted, or can no longer be included. Nothing moved
+PURCHASE_UNMATCHED = "unmatched"  # Tempo: on the chain but not creditable (a second transfer for a challenge)
+PURCHASE_STATUSES = (PURCHASE_PENDING, PURCHASE_PAID, PURCHASE_CREDITED, PURCHASE_FAILED, PURCHASE_UNMATCHED)
+
+# The fields ``update_credit_purchase`` may change. Every other field is fixed when the purchase is made.
+PURCHASE_MUTABLE_FIELDS = frozenset(
+    {"status", "payment_intent", "stripe_attempt", "stripe_retry_at", "refund_id", "refund_status"}
+)
+
+# The claim that binds a Tempo challenge to the one transaction that pays it (``bind_tempo_payment``).
+TEMPO_CHALLENGE_CLAIM = "calotype:tempo-challenge:"
+
+# What ``bind_tempo_payment`` found.
+BOUND = "bound"  # this call bound the challenge and made the purchase
+BOUND_ALREADY = "same"  # the challenge was already bound to this transaction
+CHALLENGE_TAKEN = "challenge_taken"  # the challenge is bound to another transaction
+TRANSACTION_TAKEN = "transaction_taken"  # the transaction is recorded for something else
 
 
 # A key made from a link tagged ?ref=<tag> is labelled "ref:<tag>", so the
@@ -321,11 +365,32 @@ class Storage(Protocol):
         challenge_id: str = "",
         method: str = "stripe",
         payment_intent: str | None = None,
+        status: str = PURCHASE_CREDITED,
+        tempo_terms: str | None = None,
     ) -> tuple[bool, int]: ...
+    def bind_tempo_payment(
+        self,
+        purchase_id: str,
+        key_id: int,
+        *,
+        pack: str,
+        screenshots: int,
+        amount_cents: int,
+        currency: str,
+        challenge_id: str,
+        status: str,
+        tempo_terms: str,
+        valid_before: int | None = None,
+    ) -> tuple[str, CreditPurchase | None]: ...
+    def update_credit_purchase(
+        self, purchase_id: str, changes: dict, *, only_if_status: tuple[str, ...] | None = None
+    ) -> CreditPurchase | None: ...
+    def credit_tempo_purchase(self, purchase_id: str, payment_intent: str) -> tuple[bool, int]: ...
     def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None: ...
     def find_credit_purchase_by_challenge(self, challenge_id: str) -> CreditPurchase | None: ...
     def list_credit_purchases(self, key_id: int) -> list[CreditPurchase]: ...
     def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None: ...
+    def set_credit_refund_amount(self, purchase_id: str, amount_cents: int) -> int | None: ...
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool: ...
     def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool: ...
     def claim_payment(self, claim: str, owner: str, value: str) -> bool: ...
@@ -385,7 +450,14 @@ CREATE TABLE IF NOT EXISTS credit_purchases (
     refunded_at TEXT,
     credits_removed INTEGER NOT NULL DEFAULT 0,
     refund_id TEXT,
-    payment_intent TEXT
+    payment_intent TEXT,
+    status TEXT NOT NULL DEFAULT 'credited',
+    tempo_terms TEXT,
+    valid_before INTEGER,
+    stripe_attempt INTEGER NOT NULL DEFAULT 0,
+    stripe_retry_at TEXT,
+    refund_amount_cents INTEGER,
+    refund_status TEXT
 );
 CREATE TABLE IF NOT EXISTS payment_claims (
     claim TEXT PRIMARY KEY,
@@ -448,6 +520,13 @@ _ADDED_KEY_COLUMNS = {
 }
 _ADDED_PURCHASE_COLUMNS = {
     "payment_intent": "TEXT",
+    "status": "TEXT NOT NULL DEFAULT 'credited'",
+    "tempo_terms": "TEXT",
+    "valid_before": "INTEGER",
+    "stripe_attempt": "INTEGER NOT NULL DEFAULT 0",
+    "stripe_retry_at": "TEXT",
+    "refund_amount_cents": "INTEGER",
+    "refund_status": "TEXT",
 }
 _INDEXES = """
 CREATE INDEX IF NOT EXISTS api_keys_subscription ON api_keys (stripe_subscription_id);
@@ -725,15 +804,20 @@ class SQLiteStorage:
         challenge_id: str = "",
         method: str = "stripe",
         payment_intent: str | None = None,
+        status: str = PURCHASE_CREDITED,
+        tempo_terms: str | None = None,
     ) -> tuple[bool, int]:
         """Record a paid pack and add its screenshots, once per ``purchase_id``.
 
         Returns (added, balance after the call). ``added`` is False, and
         nothing changes, if this purchase was recorded before or the key does
-        not exist.
+        not exist. A purchase recorded with another ``status`` than
+        "credited" adds nothing to the balance.
         """
         if screenshots <= 0:
             raise ValueError("a purchase adds at least one screenshot")
+        if status not in PURCHASE_STATUSES:
+            raise ValueError(f"unknown purchase status {status!r}")
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             db = self._db()
@@ -741,28 +825,160 @@ class SQLiteStorage:
             try:
                 added = False
                 if db.execute("SELECT 1 FROM api_keys WHERE id = ?", (key_id,)).fetchone() is not None:
-                    cur = db.execute(
-                        "INSERT INTO credit_purchases (id, key_id, pack, screenshots, amount_cents, currency, "
-                        "challenge_id, method, created_at, payment_intent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT (id) DO NOTHING",
-                        (
-                            purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, now,
-                            payment_intent,
-                        ),
+                    added = self._insert_purchase_locked(
+                        purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, now,
+                        payment_intent, status, tempo_terms, None,
                     )
-                    added = cur.rowcount == 1
-                    if added:
-                        db.execute(
-                            "INSERT INTO credits (key_id, balance) VALUES (?, ?) "
-                            "ON CONFLICT (key_id) DO UPDATE SET balance = balance + excluded.balance",
-                            (key_id, screenshots),
-                        )
+                    if added and status == PURCHASE_CREDITED:
+                        self._add_credit_locked(key_id, screenshots)
                 balance = self._credit_locked(key_id)
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
         return added, balance
+
+    def bind_tempo_payment(
+        self,
+        purchase_id: str,
+        key_id: int,
+        *,
+        pack: str,
+        screenshots: int,
+        amount_cents: int,
+        currency: str,
+        challenge_id: str,
+        status: str,
+        tempo_terms: str,
+        valid_before: int | None = None,
+    ) -> tuple[str, CreditPurchase | None]:
+        """Bind a Tempo challenge to the one transaction that pays it, and record that purchase, as one step.
+
+        Nothing is credited: the purchase starts ``status`` ("pending" or
+        "paid"). Returns what was found: ``BOUND`` (done now), ``BOUND_ALREADY``
+        (the same pair, from an earlier call), ``CHALLENGE_TAKEN`` (the
+        challenge is bound to another transaction, whose purchase is returned)
+        or ``TRANSACTION_TAKEN`` (the transaction is recorded for something
+        else, returned). ``(TRANSACTION_TAKEN, None)`` if the key does not exist.
+        """
+        if screenshots <= 0 or not challenge_id:
+            raise ValueError("a Tempo purchase needs screenshots and a challenge")
+        if status not in (PURCHASE_PENDING, PURCHASE_PAID):
+            raise ValueError("a bound purchase starts pending or paid")
+        claim, now = TEMPO_CHALLENGE_CLAIM + challenge_id, datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            db = self._db()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                found = db.execute("SELECT owner FROM payment_claims WHERE claim = ?", (claim,)).fetchone()
+                existing = db.execute(
+                    f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)
+                ).fetchone()
+                if db.execute("SELECT 1 FROM api_keys WHERE id = ?", (key_id,)).fetchone() is None:
+                    outcome, row = TRANSACTION_TAKEN, None
+                elif found is not None and found[0] != purchase_id:
+                    outcome = CHALLENGE_TAKEN
+                    row = db.execute(
+                        f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (found[0],)
+                    ).fetchone()
+                elif existing is not None:
+                    same = found is not None and existing[6] == challenge_id and int(existing[1]) == key_id
+                    outcome, row = (BOUND_ALREADY if same else TRANSACTION_TAKEN), existing
+                else:
+                    if found is None:
+                        db.execute(
+                            "INSERT INTO payment_claims (claim, owner, value, created_at) VALUES (?, ?, ?, ?)",
+                            (claim, purchase_id, purchase_id, now),
+                        )
+                    self._insert_purchase_locked(
+                        purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, "tempo", now,
+                        None, status, tempo_terms, valid_before,
+                    )
+                    outcome = BOUND
+                    row = db.execute(
+                        f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)
+                    ).fetchone()
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return outcome, (_row_to_purchase(row) if row else None)
+
+    def update_credit_purchase(
+        self, purchase_id: str, changes: dict, *, only_if_status: tuple[str, ...] | None = None
+    ) -> CreditPurchase | None:
+        """Change a purchase's mutable fields (``PURCHASE_MUTABLE_FIELDS``), only while its status is one of
+        ``only_if_status`` if given. Returns the purchase as it is now, or None if nothing was changed."""
+        _check_purchase_changes(changes)
+        if not changes:
+            raise ValueError("nothing to change")
+        sets = ", ".join(f"{name} = ?" for name in changes)
+        where, args = "id = ?", [purchase_id]
+        if only_if_status is not None:
+            where += f" AND status IN ({', '.join('?' for _ in only_if_status)})"
+            args.extend(only_if_status)
+        with self._lock:
+            db = self._db()
+            cur = db.execute(f"UPDATE credit_purchases SET {sets} WHERE {where}", [*changes.values(), *args])
+            if cur.rowcount != 1:
+                return None
+            row = db.execute(f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)).fetchone()
+        return _row_to_purchase(row)
+
+    def credit_tempo_purchase(self, purchase_id: str, payment_intent: str) -> tuple[bool, int]:
+        """Release a paid Tempo purchase: link its settled PaymentIntent and add its screenshots, as one step.
+
+        Only from "paid", never after a refund, and never with another
+        PaymentIntent than one already linked. Returns (credited by this call,
+        the key's balance after it); a second call changes nothing.
+        """
+        with self._lock:
+            db = self._db()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT key_id, screenshots FROM credit_purchases WHERE id = ? AND status = ? "
+                    "AND refunded_at IS NULL AND (payment_intent IS NULL OR payment_intent = ?)",
+                    (purchase_id, PURCHASE_PAID, payment_intent),
+                ).fetchone()
+                if row is not None:
+                    db.execute(
+                        "UPDATE credit_purchases SET status = ?, payment_intent = ? WHERE id = ?",
+                        (PURCHASE_CREDITED, payment_intent, purchase_id),
+                    )
+                    self._add_credit_locked(int(row[0]), int(row[1]))
+                    key_id = int(row[0])
+                else:
+                    found = db.execute("SELECT key_id FROM credit_purchases WHERE id = ?", (purchase_id,)).fetchone()
+                    key_id = int(found[0]) if found else 0
+                balance = self._credit_locked(key_id)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return row is not None, balance
+
+    def _insert_purchase_locked(
+        self, purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, now,
+        payment_intent, status, tempo_terms, valid_before,
+    ) -> bool:
+        cur = self._db().execute(
+            "INSERT INTO credit_purchases (id, key_id, pack, screenshots, amount_cents, currency, challenge_id, "
+            "method, created_at, payment_intent, status, tempo_terms, valid_before) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            (
+                purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, now,
+                payment_intent, status, tempo_terms, valid_before,
+            ),
+        )
+        return cur.rowcount == 1
+
+    def _add_credit_locked(self, key_id: int, screenshots: int) -> None:
+        self._db().execute(
+            "INSERT INTO credits (key_id, balance) VALUES (?, ?) "
+            "ON CONFLICT (key_id) DO UPDATE SET balance = balance + excluded.balance",
+            (key_id, screenshots),
+        )
 
     def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None:
         with self._lock:
@@ -808,7 +1024,9 @@ class SQLiteStorage:
                 changed = False
                 if row is not None and row[9] is None:
                     purchase = _row_to_purchase(row)
-                    removed = min(purchase.screenshots, self._credit_locked(purchase.key_id))
+                    # A purchase never credited (a Tempo payment not yet matched, or unmatched) gave nothing.
+                    held = self._credit_locked(purchase.key_id) if purchase.credited else 0
+                    removed = min(purchase.screenshots, held)
                     db.execute(
                         "UPDATE credits SET balance = balance - ? WHERE key_id = ?", (removed, purchase.key_id)
                     )
@@ -825,6 +1043,22 @@ class SQLiteStorage:
                 db.execute("ROLLBACK")
                 raise
         return (_row_to_purchase(row), changed) if row else None
+
+    def set_credit_refund_amount(self, purchase_id: str, amount_cents: int) -> int | None:
+        """Fix the amount to refund for a refunded purchase, the first time only. Returns the amount fixed,
+        or None if the purchase does not exist or has not been refunded."""
+        with self._lock:
+            db = self._db()
+            db.execute(
+                "UPDATE credit_purchases SET refund_amount_cents = ? WHERE id = ? AND refunded_at IS NOT NULL "
+                "AND refund_amount_cents IS NULL",
+                (int(amount_cents), purchase_id),
+            )
+            row = db.execute(
+                "SELECT refund_amount_cents FROM credit_purchases WHERE id = ? AND refunded_at IS NOT NULL",
+                (purchase_id,),
+            ).fetchone()
+        return None if row is None or row[0] is None else int(row[0])
 
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool:
         """Record the Stripe Refund made for a refunded purchase."""
@@ -1041,8 +1275,17 @@ def _row_to_key(row) -> ApiKey:
 
 _PURCHASE_COLUMNS = (
     "id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, created_at, "
-    "refunded_at, credits_removed, refund_id, payment_intent"
+    "refunded_at, credits_removed, refund_id, payment_intent, status, tempo_terms, valid_before, "
+    "stripe_attempt, stripe_retry_at, refund_amount_cents, refund_status"
 )
+
+
+def _check_purchase_changes(changes: dict) -> None:
+    unknown = set(changes) - PURCHASE_MUTABLE_FIELDS
+    if unknown:
+        raise ValueError(f"not a field that can change: {sorted(unknown)}")
+    if "status" in changes and changes["status"] not in PURCHASE_STATUSES:
+        raise ValueError(f"unknown purchase status {changes['status']!r}")
 
 
 def _row_to_purchase(row) -> CreditPurchase:
@@ -1060,6 +1303,13 @@ def _row_to_purchase(row) -> CreditPurchase:
         credits_removed=int(row[10] or 0),
         refund_id=row[11],
         payment_intent=row[12],
+        status=row[13] or PURCHASE_CREDITED,
+        tempo_terms=row[14],
+        valid_before=None if row[15] is None else int(row[15]),
+        stripe_attempt=int(row[16] or 0),
+        stripe_retry_at=row[17],
+        refund_amount_cents=None if row[18] is None else int(row[18]),
+        refund_status=row[19],
     )
 
 

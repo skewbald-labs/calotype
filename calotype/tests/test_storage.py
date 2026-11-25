@@ -638,3 +638,102 @@ def test_an_older_database_gets_the_payment_intent_column(tmp_path):
                           method="tempo", payment_intent="pi_test_1")
     assert s.get_credit_purchase(TX).payment_intent == "pi_test_1"
     s.close()
+
+
+# --- Tempo purchases: bound, then credited once Stripe settles (credits.py) ------------------------------------
+
+TX_A, TX_B = "0x" + "aa" * 32, "0x" + "bb" * 32
+
+
+def bind(store, key_id, tx=TX_A, challenge="ch_1", status="pending"):
+    return store.bind_tempo_payment(
+        tx, key_id, pack="starter", screenshots=5000, amount_cents=1900, currency="usd", challenge_id=challenge,
+        status=status, tempo_terms='{"challenge_id": "ch_1"}', valid_before=1_800_000_000,
+    )
+
+
+def test_a_challenge_binds_one_transaction_and_credits_nothing(store):
+    _, key = store.create_key("free")
+    outcome, purchase = bind(store, key.id)
+    assert outcome == "bound"
+    assert (purchase.status, purchase.challenge_id, purchase.valid_before, purchase.method) == (
+        "pending", "ch_1", 1_800_000_000, "tempo"
+    )
+    assert store.get_credit_balance(key.id) == 0
+    assert bind(store, key.id)[0] == "same"
+    outcome, other = bind(store, key.id, tx=TX_B)
+    assert outcome == "challenge_taken" and other.id == TX_A
+    assert store.get_credit_purchase(TX_B) is None
+    assert bind(store, key.id, challenge="ch_2")[0] == "transaction_taken"
+    assert store.find_credit_purchase_by_challenge("ch_1").id == TX_A
+
+
+def test_parallel_binds_of_one_challenge_give_it_to_one_transaction(store):
+    _, key = store.create_key("free")
+    txs = ["0x" + f"{n:02x}" * 32 for n in range(1, 7)]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        outcomes = list(pool.map(lambda tx: bind(store, key.id, tx=tx)[0], txs))
+    assert outcomes.count("bound") == 1 and outcomes.count("challenge_taken") == 5
+    assert len(store.list_credit_purchases(key.id)) == 1
+
+
+def test_a_paid_tempo_purchase_is_credited_once_and_never_after_a_refund(store):
+    _, key = store.create_key("free")
+    bind(store, key.id)
+    assert store.credit_tempo_purchase(TX_A, "pi_1") == (False, 0)  # still pending: not on the chain yet
+    assert store.update_credit_purchase(TX_A, {"status": "paid"}, only_if_status=("pending",)).status == "paid"
+    assert store.update_credit_purchase(TX_A, {"status": "failed"}, only_if_status=("pending",)) is None
+    assert store.credit_tempo_purchase(TX_A, "pi_1") == (True, 5000)
+    purchase = store.get_credit_purchase(TX_A)
+    assert (purchase.status, purchase.credited, store.get_credit_balance(key.id)) == ("credited", True, 5000)
+    assert store.credit_tempo_purchase(TX_A, purchase.payment_intent) == (False, 5000)
+
+    bind(store, key.id, tx=TX_B, challenge="ch_2", status="paid")
+    store.refund_credit_purchase(TX_B)
+    assert store.get_credit_purchase(TX_B).credits_removed == 0  # it never gave any credit
+    assert store.credit_tempo_purchase(TX_B, "pi_2") == (False, 5000)
+    assert store.get_credit_purchase(TX_B).status == "paid"
+
+
+def test_a_linked_payment_intent_is_never_replaced_when_crediting(store):
+    _, key = store.create_key("free")
+    bind(store, key.id, status="paid")
+    assert store.set_credit_payment_intent(TX_A, "pi_1")
+    assert store.credit_tempo_purchase(TX_A, "pi_2") == (False, 0)
+    assert store.credit_tempo_purchase(TX_A, "pi_1") == (True, 5000)
+
+
+def test_purchase_fields_that_may_change(store):
+    _, key = store.create_key("free")
+    bind(store, key.id)
+    changed = store.update_credit_purchase(TX_A, {"stripe_attempt": 2, "stripe_retry_at": "2026-11-24T00:00:00+00:00"})
+    assert (changed.stripe_attempt, changed.stripe_retry_at) == (2, "2026-11-24T00:00:00+00:00")
+    assert store.get_credit_purchase(TX_A).stripe_attempt == 2
+    for bad in ({"screenshots": 1}, {"amount_cents": 1}, {"key_id": 9}, {"status": "free"}):
+        with pytest.raises(ValueError):
+            store.update_credit_purchase(TX_A, bad)
+    assert store.update_credit_purchase("0x" + "00" * 32, {"stripe_attempt": 1}) is None
+
+
+def test_an_unmatched_purchase_adds_nothing(store):
+    _, key = store.create_key("free")
+    added, balance = store.add_credit_purchase(
+        TX_A, key.id, pack="starter", screenshots=5000, amount_cents=1900, currency="usd", method="tempo",
+        status="unmatched",
+    )
+    assert (added, balance) == (True, 0) and store.get_credit_purchase(TX_A).status == "unmatched"
+    assert store.add_credit_purchase(
+        TX_A, key.id, pack="starter", screenshots=5000, amount_cents=1900, currency="usd", method="tempo",
+        status="unmatched",
+    ) == (False, 0)
+
+
+def test_a_refund_amount_is_fixed_once(store):
+    _, key = store.create_key("free")
+    store.add_credit_purchase("pi_r", key.id, pack="starter", screenshots=10, amount_cents=1900, currency="usd")
+    assert store.set_credit_refund_amount("pi_r", 1900) is None  # not refunded yet
+    store.refund_credit_purchase("pi_r")
+    assert store.set_credit_refund_amount("pi_r", 1425) == 1425
+    assert store.set_credit_refund_amount("pi_r", 1900) == 1425
+    purchase = store.update_credit_purchase("pi_r", {"refund_status": "pending"})
+    assert (purchase.refund_amount_cents, purchase.refund_status, purchase.status) == (1425, "pending", "credited")

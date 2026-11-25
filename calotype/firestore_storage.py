@@ -30,12 +30,18 @@ Layout, under a configurable collection prefix (default ``calotype_``):
     One document per prepaid pack bought: ``id``, ``key_id``, ``pack``,
     ``screenshots``, ``amount_cents``, ``currency``, ``challenge_id``,
     ``method``, ``created_at``, ``refunded_at``, ``credits_removed``,
-    ``refund_id``, ``payment_intent`` (a Tempo payment's PaymentIntent; absent
-    on documents written before it existed).
+    ``refund_id``, ``payment_intent`` (a Tempo payment's PaymentIntent), and
+    the fields added with the Tempo state machine (``status``, ``tempo_terms``,
+    ``valid_before``, ``stripe_attempt``, ``stripe_retry_at``,
+    ``refund_amount_cents``, ``refund_status``). Documents written before a
+    field existed simply lack it; a missing ``status`` reads as "credited".
 ``{prefix}payment_claims/{SHA-256 of the claim}``
     The replay record of on-chain payments (``storage.claim_payment``):
-    ``claim``, ``owner`` (the MPP challenge id), ``value``, ``created_at``.
-    ``create`` fails if the document exists, which makes a claim atomic.
+    ``claim``, ``owner`` (one settlement attempt for an MPP challenge), ``value``,
+    ``created_at``. ``create`` fails if the document exists, which makes a claim
+    atomic. ``bind_tempo_payment`` keeps the binding of a Tempo challenge to the
+    transaction that pays it here too (claim ``calotype:tempo-challenge:<id>``,
+    owner the transaction hash), created in the same batch as the purchase.
 ``{prefix}notices/{id}_{YYYY-MM}_{threshold}``
     A quota notice (``storage.Notice``), queued by the service with
     ``create``, so a key gets at most one per month and threshold. The
@@ -96,6 +102,10 @@ document (which fails if it exists) and ``Increment`` the balance, together or
 not at all, so a purchase is added once however often and however much in
 parallel the call is repeated. Refunding one runs in a transaction that reads
 the purchase first, so it too happens once; it is a rare operator action.
+A Tempo purchase is bound to its challenge in one batch (``create`` the purchase
+and ``create`` the challenge's claim) and credited later in a transaction that
+reads the purchase, moves it from "paid" to "credited" and increments the
+balance; both happen at most once per transaction hash.
 
 Queries use only single-field filters and sorts, which Firestore indexes
 automatically, so no composite index has to be deployed.
@@ -109,11 +119,21 @@ from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from typing import Any
 
-from google.api_core.exceptions import Aborted, AlreadyExists, NotFound
+from google.api_core.exceptions import Aborted, AlreadyExists, FailedPrecondition, NotFound
 from google.cloud import firestore
 from google.cloud.firestore import FieldFilter
 
 from .storage import (
+    BOUND,
+    BOUND_ALREADY,
+    CHALLENGE_TAKEN,
+    PURCHASE_CREDITED,
+    PURCHASE_PAID,
+    PURCHASE_PENDING,
+    PURCHASE_STATUSES,
+    TEMPO_CHALLENGE_CLAIM,
+    TRANSACTION_TAKEN,
+    _check_purchase_changes,
     KEY_REF,
     NOTICE_PENDING,
     REF_LABEL_PREFIX,
@@ -190,6 +210,39 @@ class FirestoreStorage:
         else:
             result = ref.update({field: firestore.Increment(by)})
         return int(result.transform_results[0].integer_value)
+
+    def _write_if_unchanged(self, ref, decide, *, attempts: int = 10):
+        """Read ``ref``, let ``decide(doc)`` say what to write, and write it only if the document is unchanged.
+
+        ``decide`` returns None (write nothing; the result is ``(None, doc)``)
+        or ``(result, changes, extra)``: ``changes`` for ``ref`` and ``extra``
+        a list of ``(ref, fields)`` merged in the same atomic commit. The write
+        carries the snapshot's update time as a precondition, so a parallel
+        change makes it fail whole; it is then read and decided again. No lock
+        is held, so parallel callers never wait on one another (a transaction's
+        lock can time out under a burst). Returns ``(result, doc)``, or
+        ``(None, None)`` if the document does not exist.
+        """
+        for attempt in range(attempts):
+            snap = ref.get()
+            if not snap.exists:
+                return None, None
+            doc = snap.to_dict()
+            decided = decide(doc)
+            if decided is None:
+                return None, doc
+            result, changes, extra = decided
+            batch = self._client.batch()
+            batch.update(ref, changes, option=self._client.write_option(last_update_time=snap.update_time))
+            for other, fields in extra:
+                batch.set(other, fields, merge=True)
+            try:
+                batch.commit()
+            except (FailedPrecondition, Aborted):
+                time.sleep(0.02 * (2**min(attempt, 5)))
+                continue
+            return result, {**doc, **changes}
+        raise Aborted(f"could not update {ref.id} after retries")
 
     def _key_ref(self, key_id: int):
         return self._keys.document(str(int(key_id)))
@@ -438,34 +491,33 @@ class FirestoreStorage:
         challenge_id: str = "",
         method: str = "stripe",
         payment_intent: str | None = None,
+        status: str = PURCHASE_CREDITED,
+        tempo_terms: str | None = None,
     ) -> tuple[bool, int]:
         """Record a paid pack and add its screenshots, once per ``purchase_id``.
 
         Returns (added, balance after the call). ``added`` is False, and
         nothing changes, if this purchase was recorded before or the key does
-        not exist.
+        not exist. A purchase recorded with another ``status`` than
+        "credited" adds nothing to the balance.
         """
         if screenshots <= 0:
             raise ValueError("a purchase adds at least one screenshot")
+        if status not in PURCHASE_STATUSES:
+            raise ValueError(f"unknown purchase status {status!r}")
         purchase_ref, credit_ref = self._purchase_ref(purchase_id), self._credit_ref(key_id)
         if not self._key_ref(key_id).get().exists:
             return False, 0
-        now = datetime.now(UTC).isoformat(timespec="seconds")
-        record = {
-            "id": purchase_id,
-            "key_id": int(key_id),
-            "pack": pack,
-            "screenshots": int(screenshots),
-            "amount_cents": int(amount_cents),
-            "currency": currency,
-            "challenge_id": challenge_id,
-            "method": method,
-            "created_at": now,
-            "refunded_at": None,
-            "credits_removed": 0,
-            "refund_id": None,
-            "payment_intent": payment_intent,
-        }
+        record = _purchase_record(
+            purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method,
+            payment_intent=payment_intent, status=status, tempo_terms=tempo_terms,
+        )
+        if status != PURCHASE_CREDITED:
+            try:
+                purchase_ref.create(record)
+            except AlreadyExists:
+                return False, self.get_credit_balance(key_id)
+            return True, self.get_credit_balance(key_id)
         # One atomic batch: the purchase document is created only if it does not
         # exist, and the balance grows by an Increment in the same commit. Either
         # both happen or neither. No read is involved, so parallel calls for one
@@ -487,6 +539,102 @@ class FirestoreStorage:
                 continue
             return True, int(results[1].transform_results[0].integer_value)
         raise Aborted(f"could not record purchase {purchase_id} after retries")
+
+    def bind_tempo_payment(
+        self,
+        purchase_id: str,
+        key_id: int,
+        *,
+        pack: str,
+        screenshots: int,
+        amount_cents: int,
+        currency: str,
+        challenge_id: str,
+        status: str,
+        tempo_terms: str,
+        valid_before: int | None = None,
+    ) -> tuple[str, CreditPurchase | None]:
+        """Bind a Tempo challenge to one transaction and record its purchase, as one batch (see storage.py)."""
+        if screenshots <= 0 or not challenge_id:
+            raise ValueError("a Tempo purchase needs screenshots and a challenge")
+        if status not in (PURCHASE_PENDING, PURCHASE_PAID):
+            raise ValueError("a bound purchase starts pending or paid")
+        if not self._key_ref(key_id).get().exists:
+            return TRANSACTION_TAKEN, None
+        purchase_ref = self._purchase_ref(purchase_id)
+        claim = TEMPO_CHALLENGE_CLAIM + challenge_id
+        claim_ref = self._claim_ref(claim)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        record = _purchase_record(
+            purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, "tempo",
+            status=status, tempo_terms=tempo_terms, valid_before=valid_before,
+        )
+        for attempt in range(6):
+            # Both documents are created together or neither is: no read, so parallel calls do not contend.
+            batch = self._client.batch()
+            batch.create(purchase_ref, record)
+            batch.create(claim_ref, {"claim": claim, "owner": purchase_id, "value": purchase_id, "created_at": now})
+            try:
+                batch.commit()
+                return BOUND, _doc_to_purchase(record)
+            except AlreadyExists:
+                pass
+            except Aborted:
+                time.sleep(0.05 * (2**attempt))
+            claim_snap, purchase_snap = claim_ref.get(), purchase_ref.get()
+            if claim_snap.exists and claim_snap.get("owner") != purchase_id:
+                other = self._purchase_ref(claim_snap.get("owner")).get()
+                return CHALLENGE_TAKEN, _doc_to_purchase(other.to_dict()) if other.exists else None
+            if purchase_snap.exists:
+                found = _doc_to_purchase(purchase_snap.to_dict())
+                same = claim_snap.exists and found.challenge_id == challenge_id and found.key_id == key_id
+                return (BOUND_ALREADY if same else TRANSACTION_TAKEN), found
+            if claim_snap.exists:
+                # The claim without its purchase cannot come from this method; make the purchase alone.
+                try:
+                    purchase_ref.create(record)
+                    return BOUND, _doc_to_purchase(record)
+                except AlreadyExists:
+                    continue
+        raise Aborted(f"could not bind purchase {purchase_id} after retries")
+
+    def update_credit_purchase(
+        self, purchase_id: str, changes: dict, *, only_if_status: tuple[str, ...] | None = None
+    ) -> CreditPurchase | None:
+        """Change a purchase's mutable fields, only while its status is one of ``only_if_status`` if given."""
+        _check_purchase_changes(changes)
+        if not changes:
+            raise ValueError("nothing to change")
+
+        def decide(doc):
+            if only_if_status is not None and (doc.get("status") or PURCHASE_CREDITED) not in only_if_status:
+                return None
+            return True, dict(changes), []
+
+        done, doc = self._write_if_unchanged(self._purchase_ref(purchase_id), decide)
+        return _doc_to_purchase(doc) if done else None
+
+    def credit_tempo_purchase(self, purchase_id: str, payment_intent: str) -> tuple[bool, int]:
+        """Release a paid Tempo purchase: link its PaymentIntent and add its screenshots, as one step."""
+
+        def decide(doc):
+            if (
+                doc.get("status") != PURCHASE_PAID
+                or doc.get("refunded_at") is not None
+                or doc.get("payment_intent") not in (None, payment_intent)
+            ):
+                return None
+            credit = {"key_id": int(doc["key_id"]), "balance": firestore.Increment(int(doc["screenshots"]))}
+            return (
+                True,
+                {"status": PURCHASE_CREDITED, "payment_intent": payment_intent},
+                [(self._credit_ref(doc["key_id"]), credit)],
+            )
+
+        changed, doc = self._write_if_unchanged(self._purchase_ref(purchase_id), decide)
+        if doc is None:
+            return False, 0
+        return bool(changed), self.get_credit_balance(int(doc["key_id"]))
 
     def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None:
         snap = self._purchase_ref(purchase_id).get()
@@ -523,14 +671,33 @@ class FirestoreStorage:
             # The stored value, which a refused consume_credit may hold below zero
             # for an instant: subtract from it as it is, so that undo still lands right.
             stored = int(credit.get("balance")) if credit.exists else 0
-            removed = min(int(doc["screenshots"]), max(stored, 0))
-            if credit.exists:
+            # A purchase never credited (a Tempo payment not yet matched, or unmatched) gave nothing.
+            credited = (doc.get("status") or PURCHASE_CREDITED) == PURCHASE_CREDITED
+            removed = min(int(doc["screenshots"]), max(stored, 0)) if credited else 0
+            if credit.exists and removed:
                 t.update(credit_ref, {"balance": stored - removed})
             changes = {"refunded_at": now, "credits_removed": removed}
             t.update(purchase_ref, changes)
             return _doc_to_purchase({**doc, **changes}), True
 
         return refund(self._client.transaction())
+
+    def set_credit_refund_amount(self, purchase_id: str, amount_cents: int) -> int | None:
+        """Fix the amount to refund for a refunded purchase, the first time only (see storage.py)."""
+        ref = self._purchase_ref(purchase_id)
+
+        @firestore.transactional
+        def fix(t) -> int | None:
+            snap = ref.get(transaction=t)
+            if not snap.exists or snap.get("refunded_at") is None:
+                return None
+            fixed = snap.to_dict().get("refund_amount_cents")
+            if fixed is not None:
+                return int(fixed)
+            t.update(ref, {"refund_amount_cents": int(amount_cents)})
+            return int(amount_cents)
+
+        return fix(self._client.transaction())
 
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool:
         """Record the Stripe Refund made for a refunded purchase."""
@@ -548,17 +715,14 @@ class FirestoreStorage:
 
     def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool:
         """Link a purchase to the PaymentIntent that records it in Stripe. Never replaces another one."""
-        ref = self._purchase_ref(purchase_id)
 
-        @firestore.transactional
-        def record(t) -> bool:
-            snap = ref.get(transaction=t)
-            if not snap.exists or snap.to_dict().get("payment_intent") not in (None, payment_intent):
-                return False
-            t.update(ref, {"payment_intent": payment_intent})
-            return True
+        def link(doc):
+            if doc.get("payment_intent") is not None:
+                return None  # linked already: to this one (True below) or to another (False)
+            return True, {"payment_intent": payment_intent}, []
 
-        return record(self._client.transaction())
+        done, doc = self._write_if_unchanged(self._purchase_ref(purchase_id), link)
+        return bool(done) or (doc is not None and doc.get("payment_intent") == payment_intent)
 
     # --- payment claims: the replay record of on-chain payments (tempo.py) -------------------
 
@@ -784,6 +948,34 @@ def _purchase_doc_id(purchase_id: str) -> str:
     return purchase_id
 
 
+def _purchase_record(
+    purchase_id, key_id, pack, screenshots, amount_cents, currency, challenge_id, method, *,
+    payment_intent=None, status=PURCHASE_CREDITED, tempo_terms=None, valid_before=None,
+) -> dict:
+    return {
+        "id": purchase_id,
+        "key_id": int(key_id),
+        "pack": pack,
+        "screenshots": int(screenshots),
+        "amount_cents": int(amount_cents),
+        "currency": currency,
+        "challenge_id": challenge_id,
+        "method": method,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "refunded_at": None,
+        "credits_removed": 0,
+        "refund_id": None,
+        "payment_intent": payment_intent,
+        "status": status,
+        "tempo_terms": tempo_terms,
+        "valid_before": None if valid_before is None else int(valid_before),
+        "stripe_attempt": 0,
+        "stripe_retry_at": None,
+        "refund_amount_cents": None,
+        "refund_status": None,
+    }
+
+
 def _doc_to_purchase(d: dict) -> CreditPurchase:
     return CreditPurchase(
         id=d["id"],
@@ -799,6 +991,13 @@ def _doc_to_purchase(d: dict) -> CreditPurchase:
         credits_removed=int(d.get("credits_removed") or 0),
         refund_id=d.get("refund_id"),
         payment_intent=d.get("payment_intent"),
+        status=d.get("status") or PURCHASE_CREDITED,
+        tempo_terms=d.get("tempo_terms"),
+        valid_before=None if d.get("valid_before") is None else int(d["valid_before"]),
+        stripe_attempt=int(d.get("stripe_attempt") or 0),
+        stripe_retry_at=d.get("stripe_retry_at"),
+        refund_amount_cents=None if d.get("refund_amount_cents") is None else int(d["refund_amount_cents"]),
+        refund_status=d.get("refund_status"),
     )
 
 
