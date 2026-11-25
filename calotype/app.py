@@ -37,7 +37,7 @@ from .config import SITE_DIR, CreditPack, Settings
 from .credits import HANDLED_EVENTS as CREDIT_EVENTS
 from .credits import MIN_CARD_CENTS
 from .credits import UNAVAILABLE_MESSAGE as CREDITS_UNAVAILABLE_MESSAGE
-from .credits import CreditsProvider, PaymentRefused, PaymentUnconfirmed, credits_from_env
+from .credits import CreditsProvider, PaymentConflict, PaymentRefused, PaymentUnconfirmed, credits_from_env
 
 # How the 402's message names each MPP method.
 METHOD_NAMES = {"stripe": "a card through a Stripe shared payment token", "tempo": "USDC on Tempo"}
@@ -200,12 +200,14 @@ def create_app(
             # Switched on but incomplete. Left unsaid when it was never switched on.
             log_event(log, "prepaid credit is off", level=logging.WARNING, missing=credits_missing)
         if credits.configured:
-            # Which MPP methods the 402 offers: "stripe" (cards), and "tempo" (USDC) when switched on.
+            # Which MPP methods the 402 offers: "stripe" (cards), and "tempo" (USDC) when switched on and the
+            # deposit address is this Stripe account's own (asked of Stripe now; see credits.tempo_ready).
             tempo_config = getattr(getattr(credits, "config", None), "tempo", None)
+            offered = getattr(credits, "offered_methods", None)
             log_event(
                 log,
                 "prepaid credit is on",
-                methods=list(getattr(credits, "methods", ())),
+                methods=list(await asyncio.to_thread(offered) if offered else getattr(credits, "methods", ())),
                 tempo_chain_id=tempo_config.chain_id if tempo_config else None,
             )
         if not notices_on:
@@ -903,6 +905,9 @@ def create_app(
             )
         except PaymentRefused as e:
             return payment_challenge(key, pack, realm, header, e.problem, e.detail)
+        except PaymentConflict as e:
+            # A second transfer for a challenge that another one already pays. Not "pay again".
+            raise ApiError(409, "payment_conflict", e.detail, payment={"method": "tempo", "reference": e.reference})
         except PaymentUnconfirmed as e:
             who = "The Tempo network" if e.method == "tempo" else "Stripe"
             raise ApiError(
@@ -915,6 +920,27 @@ def create_app(
             raise ApiError(503, "billing_unavailable", CREDITS_UNAVAILABLE_MESSAGE)
         except BillingProviderError:
             raise ApiError(502, "billing_error", "The payment provider could not take the payment. Try again shortly.")
+        if paid.pending:
+            # Bound to this challenge and not credited yet. No Payment-Receipt: MPP's receipt means success.
+            return JSONResponse(
+                {
+                    "pack": pack.name,
+                    "status": "pending",
+                    "screenshots_added": 0,
+                    "credits": paid.balance,
+                    "already_credited": False,
+                    "payment": {
+                        "method": paid.method,
+                        "reference": paid.reference,
+                        "amount_usd": pack.price_usd_cents / 100,
+                    },
+                    "message": f"{paid.detail} Send the same request with the same credential again in a few "
+                    "seconds, even after the challenge has expired: it is never charged twice, and the credit is "
+                    "added once the payment settles. GET /v1/usage shows it too.",
+                },
+                status_code=202,
+                headers={"Retry-After": "10", "Cache-Control": "no-store"},
+            )
         return JSONResponse(
             {
                 "pack": pack.name,

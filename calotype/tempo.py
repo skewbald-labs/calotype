@@ -21,19 +21,28 @@ What this module does, and what it leaves to the protocol's official SDK
   here (HMAC id), unchanged, for this key and pack, not expired, and its
   ``request`` exactly what this pack costs now. Every term the chain is then
   checked against therefore comes from this server, never from the buyer.
-- The chain is checked by the SDK's ``ChargeIntent`` (``validate`` then
-  ``broadcast``, the lifecycle its own server runs): the RPC node is on the
+- The chain is checked by the SDK's ``ChargeIntent`` in two steps.
+  ``check`` (the SDK's ``validate``) changes nothing: the RPC node is on the
   challenge's chain (``eth_chainId``); a pull transaction is a Tempo
-  transaction for that chain, whose transfer pays this amount of this token
-  to this recipient, is broadcast and must succeed; a push hash must have a
-  successful receipt with such a Transfer log. Either way the transfer must
-  carry the MPP attribution memo bound to this challenge id and realm, so a
-  transfer made for one challenge (someone else's, seen on the chain) cannot
-  pay another. The SDK's replay record (``ClaimStore``, in Calotype's own
-  storage, shared by every instance) lets one transaction pay once.
-- The result is a ``Payment`` with the transaction hash. ``credits.py``
-  credits the pack under that hash (``add_credit_purchase``, atomic and
-  once), then records the payment in Stripe as a crypto PaymentIntent.
+  transaction for that chain whose transfer pays this amount of this token to
+  this recipient; a push hash has a successful receipt with such a Transfer
+  log. Either way the transfer must carry the MPP attribution memo bound to
+  this challenge id and realm, so a transfer made for one challenge (someone
+  else's, seen on the chain) cannot pay another. It returns the transaction
+  hash, known before anything is broadcast.
+- ``credits.py`` then binds the challenge to that one hash in storage
+  (``bind_tempo_payment``) before anything moves, so a challenge is paid by
+  one transfer at most. Only then does ``broadcast`` send a pull transaction
+  (the SDK's ``broadcast``). Its replay record (``ClaimStore``) is scoped to
+  one attempt, so a failing attempt never releases a claim a parallel one holds.
+- ``lookup`` reconciles a bound transaction later, by its hash alone and never
+  by broadcasting again: the receipt is found and checked against the terms
+  stored with the purchase ("paid"), or the transfer reverted or can no longer
+  be included, by chain time past its ``valid_before`` ("failed"), or neither
+  is known yet ("pending"). This is what answers a buyer who retries after the
+  challenge expired.
+- The result is a transaction hash. ``credits.py`` releases the pack's credit
+  only once Stripe has independently matched a settled payment to it.
 
 The chain follows the Stripe key, as ``mppx``'s ``stripe.create`` does: a
 live key takes Tempo mainnet (chain 4217) and USDC.e; a sandbox key takes the
@@ -47,8 +56,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -102,6 +111,21 @@ class Payment:
     payer: str | None  # the paying address, when the SDK could tell it
 
 
+@dataclass(frozen=True)
+class Checked:
+    """A credential the SDK found to pay its challenge, before anything was broadcast."""
+
+    transaction_hash: str  # lower case, 0x and 64 hex digits
+    mode: str  # "push": already on the chain, receipt checked; "pull": a signed transaction to broadcast
+    valid_before: int | None  # pull: after this Unix time it can no longer be included
+
+
+# What ``lookup`` found for a bound transaction.
+CHAIN_PAID = "paid"
+CHAIN_FAILED = "failed"
+CHAIN_PENDING = "pending"
+
+
 def is_live_key(stripe_secret_key: str) -> bool:
     """Stripe's sample decides live mode the same way: ``!key.includes('_test_')``."""
     return "_test_" not in stripe_secret_key
@@ -144,6 +168,40 @@ class TempoConfig:
         return cls(recipient=recipient, livemode=is_live_key(stripe_secret_key), rpc_url=rpc_url), []
 
 
+def deposit_address_matches(config: TempoConfig, address: Mapping[str, Any]) -> bool:
+    """Whether one of the Stripe account's deposit addresses (``GET /v1/crypto/deposit_addresses``) is the
+    configured recipient, on Tempo, in the key's mode, and takes the token this server asks for."""
+    if str(address.get("address") or "").lower() != config.recipient.lower():
+        return False
+    if address.get("network") not in (None, NETWORK):
+        return False
+    if "livemode" in address and bool(address.get("livemode")) != config.livemode:
+        return False
+    tokens = address.get("supported_tokens") or []
+    return any(
+        isinstance(t, Mapping) and str(t.get("token_contract_address") or "").lower() == config.currency.lower()
+        for t in tokens
+    )
+
+
+def credential_transaction_hash(credential: mpp.Credential) -> str | None:
+    """The transaction a credential carries, lower case, without asking the chain: a push credential's hash,
+    or the hash of a pull credential's signed transaction (pympp's own function). None if it has none."""
+    payload = credential.payload
+    if payload.get("type") == "hash":
+        found = str(payload.get("hash") or "").lower()
+        return found if TX_HASH.match(found) else None
+    if payload.get("type") == "transaction" and isinstance(payload.get("signature"), str):
+        try:
+            from mpp.methods.tempo.intents import _canonical_raw_transaction, _raw_transaction_hash
+
+            found = _raw_transaction_hash(_canonical_raw_transaction(payload["signature"])).lower()
+        except Exception:
+            return None
+        return found if TX_HASH.match(found) else None
+    return None
+
+
 def charge_request(config: TempoConfig, amount_cents: int) -> dict[str, Any]:
     """The MPP ``request`` for a Tempo charge of ``amount_cents`` US cents (1 USDC = 100 cents)."""
     return {
@@ -155,18 +213,19 @@ def charge_request(config: TempoConfig, amount_cents: int) -> dict[str, Any]:
 
 
 class ClaimStore:
-    """The SDK's replay store (``mpp.store.Store``) over Calotype's storage, for one challenge.
+    """The SDK's replay store (``mpp.store.Store``) over Calotype's storage, for one settlement attempt.
 
-    A claim belongs to the challenge being paid. Another challenge cannot take
-    or release it; the same challenge can, so a buyer who sends the same
-    credential again after a failure (this server stopped between the chain
-    and the credit) has it checked again instead of refused as used. Crediting
-    is keyed by the transaction hash, so checking it twice credits it once.
+    The owner is the challenge id and an id of this attempt alone, so two
+    attempts at once (the same credential sent twice) never share a claim: the
+    second is refused while the first holds it, and a failing attempt can only
+    release its own. A retry after a failure does not need the claim back:
+    ``credits.py`` has bound the challenge to the transaction already and
+    reconciles it by its hash (``TempoMethod.lookup``).
     """
 
-    def __init__(self, storage: Storage, owner: str):
+    def __init__(self, storage: Storage, challenge_id: str):
         self._storage = storage
-        self._owner = owner
+        self._owner = f"{challenge_id}#{uuid.uuid4().hex}"
 
     async def get(self, key: str) -> Any | None:
         found = self._storage.get_payment_claim(key)
@@ -176,7 +235,7 @@ class ClaimStore:
 
     async def put(self, key: str, value: Any) -> None:
         if not self._storage.claim_payment(key, self._owner, str(value)):
-            raise RuntimeError("the payment is claimed by another challenge")
+            raise RuntimeError("the payment is claimed by another attempt")
 
     async def delete(self, key: str) -> None:
         self._storage.release_payment_claim(key, self._owner)
@@ -186,7 +245,12 @@ class ClaimStore:
 
 
 class TempoMethod:
-    """Checks a ``tempo`` credential on the chain with ``pympp``. ``transport`` replaces the network in tests."""
+    """Checks a ``tempo`` credential on the chain with ``pympp``. ``transport`` replaces the network in tests.
+
+    Every method is synchronous and runs the SDK's coroutines itself: call it
+    from a worker thread (the app uses ``asyncio.to_thread``), never from a
+    running event loop.
+    """
 
     def __init__(self, config: TempoConfig, *, transport: httpx.AsyncBaseTransport | None = None):
         self.config = config
@@ -195,12 +259,13 @@ class TempoMethod:
     def request(self, amount_cents: int) -> dict[str, Any]:
         return charge_request(self.config, amount_cents)
 
-    def settle(self, credential: mpp.Credential, request: dict[str, Any], storage: Storage) -> Payment:
-        """Verify, and for a signed transaction broadcast, the payment. Raises ``Refused`` or ``Unconfirmed``.
+    def check(self, credential: mpp.Credential, request: dict[str, Any]) -> Checked:
+        """Whether the credential pays its challenge, changing nothing. Raises ``Refused`` or ``Unconfirmed``.
 
         ``credential`` must already be checked against its challenge, and
         ``request`` must be this server's own terms for it.
         """
+        _no_running_loop()
         payload_type = credential.payload.get("type")
         if payload_type not in ("transaction", "hash"):
             # "proof" pays a zero amount and "zone" a Zone withdrawal; neither is offered.
@@ -209,19 +274,44 @@ class TempoMethod:
                 "A tempo credential's payload needs type 'transaction' (a signed transfer) or 'hash'.",
             )
         try:
-            return _run(self._settle(credential, request, storage))
+            return _run(self._check(credential, request))
         except (Refused, Unconfirmed):
             raise
         except Exception as e:
             raise _translate(e) from None
 
-    async def _settle(self, credential: mpp.Credential, request: dict[str, Any], storage: Storage) -> Payment:
-        import httpx
+    def broadcast(self, credential: mpp.Credential, request: dict[str, Any], storage: Storage) -> Payment:
+        """Send a checked pull transaction and wait for its receipt. Raises ``Refused`` or ``Unconfirmed``."""
+        _no_running_loop()
+        try:
+            return _run(self._broadcast(credential, request, storage))
+        except (Refused, Unconfirmed):
+            raise
+        except Exception as e:
+            raise _translate(e) from None
+
+    def lookup(self, tx_hash: str, terms: Mapping[str, Any], valid_before: int | None) -> str:
+        """Where a bound transaction is, by its hash alone: ``CHAIN_PAID``, ``CHAIN_FAILED`` or ``CHAIN_PENDING``.
+
+        ``terms`` are the ones stored when the challenge was bound (``request``,
+        ``realm``, ``challenge_id``). Nothing is broadcast. Raises
+        ``Unconfirmed`` if the node cannot be asked.
+        """
+        _no_running_loop()
+        try:
+            return _run(self._lookup(tx_hash, terms, valid_before))
+        except Unconfirmed:
+            raise
+        except Exception as e:
+            log_event(log, "tempo lookup failed", level=logging.WARNING, error=type(e).__name__)
+            raise Unconfirmed(type(e).__name__) from None
+
+    @staticmethod
+    def _sdk_credential(credential: mpp.Credential) -> Any:
         from mpp import ChallengeEcho
         from mpp import Credential as SdkCredential
-        from mpp.methods.tempo.intents import ChargeIntent
 
-        sdk_credential = SdkCredential(
+        return SdkCredential(
             challenge=ChallengeEcho(
                 id=credential.id,
                 realm=credential.realm,
@@ -236,19 +326,68 @@ class TempoMethod:
             payload=dict(credential.payload),
             source=credential.source or None,
         )
+
+    async def _check(self, credential: mpp.Credential, request: dict[str, Any]) -> Checked:
+        import httpx
+        from mpp.methods.tempo.intents import ChargeIntent
+
+        async with httpx.AsyncClient(transport=self._transport) as client:
+            # No store: validate only reads it, and the binding in storage is the replay record here.
+            intent = ChargeIntent(rpc_url=self.config.node, http_client=client, store=None)
+            validation = await intent.validate(self._sdk_credential(credential), request)
+        details = validation.details or {}
+        tx_hash = str(details.get("transaction_hash") or "").lower()
+        if not TX_HASH.match(tx_hash):
+            # Only a fee-sponsored transaction has no hash before it is sent, and none is offered.
+            raise Refused("malformed-credential", "The tempo credential's transaction hash cannot be known.")
+        mode = "push" if details.get("mode") == "push" else "pull"
+        valid_before = details.get("valid_before")
+        return Checked(tx_hash, mode, int(valid_before) if isinstance(valid_before, int) else None)
+
+    async def _broadcast(self, credential: mpp.Credential, request: dict[str, Any], storage: Storage) -> Payment:
+        import httpx
+        from mpp.methods.tempo.intents import ChargeIntent
+
         async with httpx.AsyncClient(transport=self._transport) as client:
             intent = ChargeIntent(
                 rpc_url=self.config.node,
                 http_client=client,
                 store=ClaimStore(storage, credential.id),
             )
-            # The SDK server's own order: the check that changes nothing, then the one that settles.
-            await intent.validate(sdk_credential, request)
-            receipt = await intent.broadcast(sdk_credential, request)
+            receipt = await intent.broadcast(self._sdk_credential(credential), request)
         tx_hash = str(receipt.reference).lower()
         if not TX_HASH.match(tx_hash):
             raise Unconfirmed("the SDK returned no transaction hash")
         return Payment(tx_hash, receipt.payer)
+
+    async def _lookup(self, tx_hash: str, terms: Mapping[str, Any], valid_before: int | None) -> str:
+        import httpx
+        from mpp.errors import VerificationError
+        from mpp.methods.tempo.intents import ChargeIntent
+        from mpp.methods.tempo.schemas import ChargeRequest, HashCredentialPayload
+
+        request = ChargeRequest.model_validate(terms["request"])
+        async with httpx.AsyncClient(transport=self._transport) as client:
+            intent = ChargeIntent(rpc_url=self.config.node, http_client=client, store=None)
+            # pympp 0.26.0's own receipt check, the one its validate runs for a hash credential, without
+            # the challenge's expiry (the challenge was authorized when it was bound). The SDK is pinned.
+            await intent._assert_rpc_chain_id(request.methodDetails.chainId)
+            if await intent._get_transaction_receipt(client, tx_hash) is None:
+                if valid_before is not None and await intent._confirm_not_included(client, tx_hash, valid_before):
+                    return CHAIN_FAILED
+                return CHAIN_PENDING
+            try:
+                await intent._validate_hash(
+                    HashCredentialPayload(type="hash", hash=tx_hash),
+                    request,
+                    challenge_id=str(terms["challenge_id"]),
+                    realm=str(terms["realm"]),
+                )
+            except VerificationError as e:
+                # A receipt that reverted, or that does not pay what was bound. Either way nothing was paid.
+                log_event(log, "tempo transaction did not pay", level=logging.WARNING, error=type(e).__name__)
+                return CHAIN_FAILED
+        return CHAIN_PAID
 
 
 def _translate(e: Exception) -> Exception:
@@ -274,11 +413,15 @@ def _translate(e: Exception) -> Exception:
     return Unconfirmed(type(e).__name__)
 
 
-def _run(coro: Any) -> Any:
-    """Run a coroutine to the end from synchronous code (``settle`` runs in a worker thread)."""
+def _no_running_loop() -> None:
+    """Refuse to run on an event loop's thread: the SDK's coroutines would block it until they finish."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+        return
+    raise RuntimeError("tempo payments must be settled from a worker thread (asyncio.to_thread), not an event loop")
+
+
+def _run(coro: Any) -> Any:
+    """Run a coroutine to the end from a worker thread, which has no event loop of its own."""
+    return asyncio.run(coro)

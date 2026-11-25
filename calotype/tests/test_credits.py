@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -65,18 +66,34 @@ def auth(key: str) -> dict:
 
 
 class FakePayments:
-    """Stands in for ``stripe.StripeClient``: one PaymentIntent per idempotency key, as Stripe keeps them."""
+    """Stands in for ``stripe.StripeClient``: one PaymentIntent per idempotency key, as Stripe keeps them.
+
+    A crypto PaymentIntent (a recorded Tempo payment) gets a latest charge whose
+    ``payment_method_details.crypto`` names the transaction, as Stripe's does,
+    and the status ``crypto_status``. Refunds are kept per idempotency key and
+    listed per PaymentIntent. ``deposit_addresses`` is what
+    ``GET /v1/crypto/deposit_addresses`` lists.
+    """
 
     def __init__(self):
         self.client = MagicMock(name="StripeClient")
         self.intents: dict[str, dict] = {}  # by PaymentIntent id
         self.by_idempotency_key: dict[str, str] = {}
         self.status = "succeeded"
+        self.crypto_status = "succeeded"
         self.fail_with: Exception | None = None
+        self.refund_status = "succeeded"
+        self.refund_objects: dict[str, dict] = {}  # by Refund id
+        self.refund_keys: dict[str, str] = {}  # idempotency key -> Refund id
+        self.deposit_addresses: list[dict] = []
         self.client.v1.payment_intents.create.side_effect = self._create
-        self.client.v1.payment_intents.retrieve.side_effect = lambda intent_id: dict(self.intents[intent_id])
-        self.client.v1.refunds.create.side_effect = lambda params, options=None: SimpleNamespace(
-            id=f"re_test_{len(self.refunds)}", status="succeeded"
+        self.client.v1.payment_intents.retrieve.side_effect = self._retrieve
+        self.client.v1.payment_intents.search.side_effect = self._search
+        self.client.v1.refunds.create.side_effect = self._create_refund
+        self.client.v1.refunds.list.side_effect = self._list_refunds
+        self.client.raw_request.side_effect = lambda method, path, **params: (method, path, params)
+        self.client.deserialize.side_effect = lambda answer, api_mode: (
+            {"object": "list", "data": list(self.deposit_addresses)} if answer[0] == "get" else {}
         )
 
     def _create(self, params, options=None):
@@ -87,19 +104,66 @@ class FakePayments:
         if replayed:
             intent = self.intents[self.by_idempotency_key[idem]]
         else:
+            crypto = params.get("payment_method_types") == ["crypto"]
+            status = self.crypto_status if crypto else self.status
             intent = {
                 "id": f"pi_test_{len(self.intents) + 1}",
                 "object": "payment_intent",
-                "status": self.status,
+                "status": status,
                 "amount": params["amount"],
-                "amount_received": params["amount"] if self.status == "succeeded" else 0,
+                "amount_received": params["amount"] if status == "succeeded" else 0,
                 "currency": params["currency"],
                 "metadata": dict(params["metadata"]),
+                "payment_method_types": list(params.get("payment_method_types") or ["card"]),
             }
+            if crypto:
+                verification = params["payment_method_options"]["crypto"]["transaction_verification_options"]
+                intent["latest_charge"] = crypto_charge(verification["transaction_hash"], verification["network"])
             self.intents[intent["id"]] = intent
             self.by_idempotency_key[idem] = intent["id"]
         headers = {"idempotent-replayed": "true"} if replayed else {}
         return SimpleNamespace(**intent, last_response=SimpleNamespace(headers=headers))
+
+    def _retrieve(self, intent_id, params=None):
+        return copy.deepcopy(self.intents[intent_id])
+
+    def _search(self, params):
+        match = re.search(r"'(0x[0-9a-f]{64})'", params["query"])
+        found = [copy.deepcopy(i) for i in self.intents.values()
+                 if match and i["metadata"].get("calotype_tempo_tx") == match.group(1)]
+        return {"object": "search_result", "data": found}
+
+    def settle_crypto(self, intent_id: str, status: str = "succeeded"):
+        """Stripe settles (or declines) a recorded Tempo payment."""
+        intent = self.intents[intent_id]
+        intent["status"] = status
+        intent["amount_received"] = intent["amount"] if status == "succeeded" else 0
+
+    def _create_refund(self, params, options=None):
+        idem = (options or {}).get("idempotency_key")
+        if idem in self.refund_keys:
+            refund = self.refund_objects[self.refund_keys[idem]]
+        else:
+            refund = {
+                "id": f"re_test_{len(self.refund_objects) + 1}",
+                "object": "refund",
+                "status": self.refund_status,
+                "amount": params["amount"],
+                "payment_intent": params["payment_intent"],
+                "created": len(self.refund_objects) + 1,
+            }
+            self.refund_objects[refund["id"]] = refund
+            self.refund_keys[idem] = refund["id"]
+        return SimpleNamespace(**refund)
+
+    def _list_refunds(self, params):
+        data = [dict(r) for r in self.refund_objects.values() if r["payment_intent"] == params["payment_intent"]]
+        return {"object": "list", "data": data}
+
+    def forget_idempotency_keys(self):
+        """Stripe prunes idempotency keys after 24 hours."""
+        self.by_idempotency_key.clear()
+        self.refund_keys.clear()
 
     @property
     def create(self) -> MagicMock:
@@ -108,6 +172,19 @@ class FakePayments:
     @property
     def refunds(self) -> list:
         return self.client.v1.refunds.create.call_args_list
+
+
+def crypto_charge(tx_hash: str, network: str = "tempo") -> dict:
+    """A charge as Stripe records a verified crypto transfer."""
+    return {
+        "id": f"py_test_{tx_hash[2:10]}",
+        "object": "charge",
+        "payment_method_details": {
+            "type": "crypto",
+            "crypto": {"buyer_address": "0x" + "99" * 20, "network": network, "token_currency": "usdc",
+                       "transaction_hash": tx_hash},
+        },
+    }
 
 
 @pytest.fixture
@@ -1089,7 +1166,7 @@ def test_a_webhook_stripe_cannot_confirm_is_retried(cclient, store, payments):
     payload = event("evt_retry", "payment_intent.succeeded", obj)
     assert post_event(cclient, payload).status_code == 500
     assert not store.event_processed("evt_retry") and store.get_credit_balance(key.id) == 0
-    payments.client.v1.payment_intents.retrieve.side_effect = lambda intent_id: dict(payments.intents[intent_id])
+    payments.client.v1.payment_intents.retrieve.side_effect = payments._retrieve
     assert post_event(cclient, payload).json()["outcome"] == "credited"
 
 
@@ -1327,7 +1404,8 @@ def test_refund_takes_the_unused_credit_back_and_refunds_in_full(admin_store, ad
             "payment_intent": "pi_bought",
             "amount": 1900,
             "reason": "requested_by_customer",
-            "metadata": {"calotype_key_id": str(key.id), "calotype_credit_pack": "starter"},
+            "metadata": {"calotype_key_id": str(key.id), "calotype_credit_pack": "starter",
+                         "calotype_purchase": "pi_bought"},
         },
         options={"idempotency_key": "calotype_credit_refund_pi_bought"},
     )
@@ -1410,6 +1488,58 @@ def test_a_refund_stripe_refuses_can_be_finished_later(admin_store, admin_paymen
     # Both attempts carried the same idempotency key, so Stripe makes one refund whatever happened to the first.
     keys = {c.kwargs["options"]["idempotency_key"] for c in admin_payments.client.v1.refunds.create.call_args_list}
     assert keys == {"calotype_credit_refund_pi_bought"}
+
+
+def test_a_refund_whose_id_was_never_saved_is_found_not_made_again(admin_store, admin_payments, monkeypatch, capsys):
+    """FR-26 #5: Stripe made a partial refund, saving its id failed, and Stripe has since forgotten the
+    idempotency key. Running the command again adopts that refund instead of refunding again."""
+    key = bought(admin_store, used=1250)
+    store_class = type(admin_store)
+    real = store_class.set_credit_refund_id
+    monkeypatch.setattr(store_class, "set_credit_refund_id", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("lost")))
+    with pytest.raises(RuntimeError):
+        admin.main(["refund-credit", "pi_bought", "--prorated", "--yes"])
+    monkeypatch.setattr(store_class, "set_credit_refund_id", real)
+    admin_payments.forget_idempotency_keys()
+    capsys.readouterr()
+    assert admin.main(["refund-credit", "pi_bought", "--prorated", "--yes"]) == 0
+    assert len(admin_payments.refunds) == 1 and len(admin_payments.refund_objects) == 1
+    purchase = admin_store.get_credit_purchase("pi_bought")
+    assert (purchase.refund_id, purchase.refund_status, purchase.refund_amount_cents) == ("re_test_1", "succeeded", 1425)
+    assert admin_store.get_credit_balance(key.id) == 0
+
+
+def test_a_pending_refund_is_not_done_and_a_failed_one_is_made_again(admin_store, admin_payments, capsys):
+    bought(admin_store)
+    admin_payments.refund_status = "pending"
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 0
+    assert "not done" in capsys.readouterr().err
+    assert admin_store.get_credit_purchase("pi_bought").refund_status == "pending"
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 0  # still pending: read again, not made again
+    assert len(admin_payments.refund_objects) == 1
+
+    admin_payments.refund_objects["re_test_1"]["status"] = "failed"  # Stripe could not return the money
+    admin_payments.refund_status = "succeeded"
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 0
+    second = admin_payments.refunds[-1]
+    assert second.kwargs["options"]["idempotency_key"] == "calotype_credit_refund_pi_bought_1"
+    assert second.kwargs["params"]["amount"] == 1900
+    purchase = admin_store.get_credit_purchase("pi_bought")
+    assert (purchase.refund_id, purchase.refund_status) == ("re_test_2", "succeeded")
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 0
+    assert "already refunded" in capsys.readouterr().err and len(admin_payments.refund_objects) == 2
+
+
+def test_the_refund_amount_is_fixed_the_first_time(admin_store, admin_payments, capsys):
+    key = bought(admin_store, used=1250)
+    ok = admin_payments.client.v1.refunds.create.side_effect
+    admin_payments.client.v1.refunds.create.side_effect = stripe.APIConnectionError("network down")
+    assert admin.main(["refund-credit", "pi_bought", "--prorated", "--yes"]) == 1
+    admin_payments.client.v1.refunds.create.side_effect = ok
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 0  # no --prorated this time: same amount
+    assert admin_payments.refunds[-1].kwargs["params"]["amount"] == 1425
+    assert admin_store.get_credit_purchase("pi_bought").refund_amount_cents == 1425
+    assert admin_store.get_credit_balance(key.id) == 0
 
 
 def test_refund_of_an_unknown_purchase(admin_store, no_stripe_allowed, capsys):

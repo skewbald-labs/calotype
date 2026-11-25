@@ -48,6 +48,7 @@ from .test_credits import (  # noqa: E402
     CREDITS_ENV,
     SPT,
     FakePayments,
+    crypto_charge,
     auth,
     challenge_params,
     credential,
@@ -91,6 +92,8 @@ class FakeChain:
         self.calls: list[str] = []
         self.sent: list[str] = []
         self.down = False
+        self.block_time: int | None = None  # the latest block's timestamp; None: now
+        self.reject_sends: str | None = None  # an RPC error message for eth_sendRawTransactionSync
         self._lock = threading.Lock()
         self.transport = httpx.MockTransport(self._handle)
 
@@ -110,9 +113,13 @@ class FakeChain:
                 answer = {"result": self.receipts.get(params[0].lower())}
             elif method == "eth_getTransactionByHash":
                 answer = {"result": None}
+            elif method == "eth_getBlockByNumber":
+                answer = {"result": {"number": "0x10", "timestamp": hex(self.block_time or int(time.time()))}}
             elif method == "eth_sendRawTransactionSync":
                 tx_hash = tx_hash_of(params[0])
-                if tx_hash in self.receipts:
+                if self.reject_sends:
+                    answer = {"error": {"code": -32000, "message": self.reject_sends}}
+                elif tx_hash in self.receipts:
                     answer = {"error": {"code": -32000, "message": "already known"}}
                 else:
                     self.sent.append(params[0])
@@ -238,16 +245,24 @@ def chain() -> FakeChain:
     return FakeChain()
 
 
+DEPOSIT_ADDRESS = {
+    "id": "cda_test_1", "object": "crypto.deposit_address", "livemode": False, "network": "tempo",
+    "address": DEPOSIT, "supported_tokens": [{"token_currency": "usdc", "token_contract_address": TOKEN}],
+}
+
+
 @pytest.fixture
 def payments() -> FakePayments:
-    return FakePayments()
+    fake = FakePayments()
+    fake.deposit_addresses = [DEPOSIT_ADDRESS]  # the deposit address is this Stripe account's own
+    return fake
 
 
 @pytest.fixture
 def tempo_config() -> CreditsConfig:
     config, missing = CreditsConfig.from_env(TEMPO_ENV)
     assert missing == [], missing
-    return config
+    return replace(config, tempo_settle_wait_s=0)  # no waiting for Stripe in tests
 
 
 @pytest.fixture
@@ -307,6 +322,7 @@ def test_an_own_node_can_be_named(tempo_config):
 def test_the_app_logs_the_methods_on_offer(monkeypatch, settings, store, fake_renderer, capsys):
     for name, value in TEMPO_ENV.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setattr(StripeCredits, "tempo_deposit_addresses", lambda self, create=False: [DEPOSIT_ADDRESS])
     provider = credits_from_env()
     assert provider.methods == ("stripe", "tempo")
     with make_client(settings, store, fake_renderer, provider):
@@ -647,36 +663,327 @@ def test_an_unreachable_node_is_unconfirmed_and_the_same_credential_works_later(
     assert store.get_credit_balance(key.id) == 5000
 
 
-def test_a_stop_between_the_chain_and_the_credit_is_mended_by_sending_again(tclient, store, chain, monkeypatch):
-    """The transfer is claimed for this challenge, then the server fails before crediting. The same
-    credential is checked again (the claim is this challenge's own) and credited once."""
+class Later:
+    """``credits.datetime`` with the clock moved on, so a challenge has expired without waiting for it."""
+
+    def __init__(self, minutes: int = 10):
+        self.offset = timedelta(minutes=minutes)
+
+    def now(self, tz=None):
+        return datetime.now(tz) + self.offset
+
+    def fromisoformat(self, text):
+        return datetime.fromisoformat(text)
+
+
+def expire_challenges(monkeypatch, minutes: int = 10):
+    from calotype import credits as credits_module
+
+    monkeypatch.setattr(credits_module, "datetime", Later(minutes))
+
+
+def test_a_settled_transfer_whose_credit_failed_is_credited_after_expiry(tclient, store, chain, monkeypatch):
+    """FR-26 #1: the transfer is on the chain, then the server fails before the credit is written. The same
+    credential sent again after the challenge expired is credited once, and never answered "pay again"."""
     raw, key = store.create_key("free")
     params = tempo_params(ask(tclient, raw))
-    header = credential(params, {"type": "hash", "hash": pushed_transfer(chain, params)})
-    real_add = store.add_credit_purchase
-    monkeypatch.setattr(store, "add_credit_purchase", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stopped")))
+    header = credential(params, {"type": "transaction", "signature": signed_transfer(chain, params)})
+    real = store.credit_tempo_purchase
+    monkeypatch.setattr(store, "credit_tempo_purchase", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stopped")))
     with pytest.raises(RuntimeError):
         send(tclient, raw, header)
-    assert store.get_payment_claim(f"mpp:charge:{'0x' + 'ab' * 32}")[0] == params["id"]
-    monkeypatch.setattr(store, "add_credit_purchase", real_add)
+    tx_hash = tx_hash_of(chain.sent[0])
+    assert store.get_credit_purchase(tx_hash).status == "paid" and store.get_credit_balance(key.id) == 0
+    monkeypatch.setattr(store, "credit_tempo_purchase", real)
+    expire_challenges(monkeypatch)
     r = send(tclient, raw, header)
-    assert r.status_code == 200 and r.json()["already_credited"] is False
-    assert store.get_credit_balance(key.id) == 5000
+    assert r.status_code == 200, r.text
+    assert r.json()["already_credited"] is False and r.json()["payment"]["reference"] == tx_hash
+    assert store.get_credit_balance(key.id) == 5000 and len(chain.sent) == 1
 
 
-def test_a_failed_stripe_record_keeps_the_credit_and_is_retried(tclient, store, chain, payments, caplog):
+def lose_the_broadcast(monkeypatch, provider, chain, *, lands: bool):
+    """The broadcast's answer is lost (a timeout, a stopped server). ``lands``: the node had it anyway."""
+
+    def broadcast(credential, request, storage):
+        raw = credential.payload["signature"]
+        if lands:
+            tx_hash = tx_hash_of(raw)
+            chain.receipts[tx_hash] = receipt(tx_hash, chain.effects.get(tx_hash, []))
+        raise tempo.Unconfirmed("PaymentOutcomeUnknownError")
+
+    monkeypatch.setattr(provider._tempo, "broadcast", broadcast)
+
+
+def test_a_broadcast_with_no_answer_is_pending_and_reconciled_after_expiry(tclient, tcredits, store, chain,
+                                                                           monkeypatch):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    signed = signed_transfer(chain, params)
+    header = credential(params, {"type": "transaction", "signature": signed})
+    lose_the_broadcast(monkeypatch, tcredits, chain, lands=False)
+    r = send(tclient, raw, header)
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["status"] == "pending" and body["payment"]["reference"] == tx_hash_of(signed)
+    assert "payment-receipt" not in r.headers and "www-authenticate" not in r.headers
+    assert store.get_credit_balance(key.id) == 0
+
+    # It reaches the chain later. The challenge has expired by the time the buyer asks again.
+    tx_hash = tx_hash_of(signed)
+    chain.receipts[tx_hash] = receipt(tx_hash, chain.effects[tx_hash])
+    monkeypatch.undo()
+    expire_challenges(monkeypatch)
+    again = send(tclient, raw, header)
+    assert again.status_code == 200, again.text
+    assert again.json()["already_credited"] is False and store.get_credit_balance(key.id) == 5000
+    assert chain.count("eth_sendRawTransactionSync") == 0  # reconciled by its hash, never sent afresh
+
+
+def test_a_transfer_that_can_no_longer_be_included_fails_and_only_then_asks_to_pay_again(
+    tclient, tcredits, store, chain, monkeypatch
+):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    signed = signed_transfer(chain, params)
+    header = credential(params, {"type": "transaction", "signature": signed})
+    lose_the_broadcast(monkeypatch, tcredits, chain, lands=False)
+    assert send(tclient, raw, header).status_code == 202
+    assert send(tclient, raw, header).status_code == 202  # still within valid_before: still pending
+    chain.block_time = int(time.time()) + 400  # chain time is past the transaction's valid_before
+    r = send(tclient, raw, header)
+    body = assert_refused(r, "verification_failed")
+    assert "did not pay" in body["detail"]
+    assert store.get_credit_purchase(tx_hash_of(signed)).status == "failed"
+    assert store.get_credit_balance(key.id) == 0
+
+
+def test_a_failed_stripe_record_is_pending_and_retried(tclient, store, chain, payments, caplog):
+    """FR-26 #2: the coins moved, but credit waits for Stripe's settlement."""
     raw, key = store.create_key("free")
     payments.fail_with = stripe.APIConnectionError("no connection")
     _, header, r = pay_tempo(tclient, chain, raw)
-    assert r.status_code == 200  # the coins moved: the buyer gets the pack whatever Stripe says
+    assert r.status_code == 202, r.text
     tx_hash = r.json()["payment"]["reference"]
-    assert store.get_credit_purchase(tx_hash).payment_intent is None
+    assert store.get_credit_purchase(tx_hash).status == "paid" and store.get_credit_balance(key.id) == 0
     assert "tempo payment not recorded in stripe" in logged(caplog)
     payments.fail_with = None
     again = send(tclient, raw, header)
-    assert again.status_code == 200 and again.json()["already_credited"] is True
+    assert again.status_code == 200 and again.json()["already_credited"] is False
     assert store.get_credit_purchase(tx_hash).payment_intent == "pi_test_1"
     assert store.get_credit_balance(key.id) == 5000
+    # The same idempotency key both times: a lost connection is not an answer Stripe kept.
+    keys = {c.kwargs["options"]["idempotency_key"] for c in payments.create.call_args_list}
+    assert keys == {f"calotype_tempo_{tx_hash}"}
+
+
+def test_credit_is_not_spendable_until_stripe_settles(tclient, store, chain, payments, fake_renderer):
+    raw, key = store.create_key("free")
+    payments.crypto_status = "processing"
+    _, header, r = pay_tempo(tclient, chain, raw)
+    assert r.status_code == 202 and r.json()["credits"] == 0
+    assert store.consume_credit(key.id) == (False, 0)
+    assert tclient.get("/v1/usage", headers=auth(raw)).json()["credits"] == 0
+    payments.settle_crypto("pi_test_1")
+    r = send(tclient, raw, header)
+    assert r.status_code == 200 and r.json()["credits"] == 5000 and r.json()["screenshots_added"] == 5000
+    assert payments.create.call_count == 1  # the linked PaymentIntent was read again, not made again
+
+
+@pytest.mark.parametrize(
+    "change, problem",
+    [
+        ({"latest_charge": None}, "transaction"),
+        ({"amount_received": 100}, "amount"),
+        ({"currency": "eur"}, "amount"),
+        ({"network": "base"}, "network"),
+        ({"transaction_hash": "0x" + "77" * 32}, "transaction"),
+    ],
+    ids=["no-charge", "amount", "currency", "network", "other-transaction"],
+)
+def test_a_settlement_that_does_not_match_the_purchase_is_not_credited(tclient, store, chain, payments, caplog,
+                                                                      change, problem):
+    raw, key = store.create_key("free")
+    original = payments._create
+
+    def create(params, options=None):
+        made = original(params, options)
+        intent = payments.intents[made.id]
+        for name in ("network", "transaction_hash"):
+            if name in change:
+                intent["latest_charge"]["payment_method_details"]["crypto"][name] = change[name]
+        intent.update({k: v for k, v in change.items() if k not in ("network", "transaction_hash")})
+        return made
+
+    payments.client.v1.payment_intents.create.side_effect = create
+    _, _, r = pay_tempo(tclient, chain, raw)
+    assert r.status_code == 202 and "does not match" in r.json()["message"]
+    assert store.get_credit_balance(key.id) == 0
+    assert "stripe settlement does not match the tempo purchase" in logged(caplog) and problem in logged(caplog)
+
+
+def test_a_declined_payment_intent_is_not_credited_and_a_new_one_is_made_only_on_request(
+    tclient, store, chain, payments, admin_payments_from
+):
+    raw, key = store.create_key("free")
+    payments.crypto_status = "requires_payment_method"
+    _, header, r = pay_tempo(tclient, chain, raw)
+    assert r.status_code == 202 and store.get_credit_balance(key.id) == 0
+    tx_hash = r.json()["payment"]["reference"]
+    assert send(tclient, raw, header).status_code == 202
+    assert payments.create.call_count == 1  # a declined PaymentIntent is not silently replaced
+
+    payments.crypto_status = "succeeded"
+    admin_payments_from(payments)
+    assert admin.main(["record-tempo", tx_hash, "--again"]) == 0
+    assert payments.create.call_args.kwargs["options"]["idempotency_key"] == f"calotype_tempo_{tx_hash}_1"
+    purchase = store.get_credit_purchase(tx_hash)
+    assert (purchase.status, purchase.payment_intent) == ("credited", "pi_test_2")
+    assert store.get_credit_balance(key.id) == 5000
+
+
+@pytest.mark.parametrize("stripe_made_it", [False, True], ids=["nothing-made", "made-before-the-500"])
+def test_a_stripe_500_is_searched_for_before_a_new_idempotency_key(tclient, store, chain, payments, stripe_made_it):
+    """Stripe's idempotency layer replays a 500 for the same key. Search after a while, then use a new key."""
+    raw, key = store.create_key("free")
+    original = payments._create
+
+    def failing(params, options=None):
+        if stripe_made_it:
+            original(params, options)
+        raise stripe.APIError("internal", http_status=500)
+
+    payments.client.v1.payment_intents.create.side_effect = failing
+    _, header, r = pay_tempo(tclient, chain, raw)
+    assert r.status_code == 202
+    tx_hash = r.json()["payment"]["reference"]
+    purchase = store.get_credit_purchase(tx_hash)
+    assert purchase.stripe_attempt == 1 and purchase.stripe_retry_at
+    payments.client.v1.payment_intents.create.side_effect = original
+    assert send(tclient, raw, header).status_code == 202  # too soon to search: nothing new is made
+    assert payments.create.call_count == 1 and not payments.client.v1.payment_intents.search.called
+
+    store.update_credit_purchase(tx_hash, {"stripe_retry_at": "2000-01-01T00:00:00+00:00"})
+    r = send(tclient, raw, header)
+    assert r.status_code == 200, r.text
+    assert payments.client.v1.payment_intents.search.called
+    if stripe_made_it:
+        assert payments.create.call_count == 1 and len(payments.intents) == 1  # found, not made twice
+    else:
+        assert payments.create.call_args.kwargs["options"]["idempotency_key"] == f"calotype_tempo_{tx_hash}_1"
+    assert store.get_credit_balance(key.id) == 5000
+
+
+@pytest.mark.parametrize(
+    "addresses",
+    [
+        [],
+        [{**DEPOSIT_ADDRESS, "address": OTHER_ADDRESS}],
+        [{**DEPOSIT_ADDRESS, "supported_tokens": [{"token_currency": "usdc", "token_contract_address": OTHER_TOKEN}]}],
+        [{**DEPOSIT_ADDRESS, "livemode": True}],
+    ],
+    ids=["none", "another-address", "another-token", "live-address"],
+)
+def test_a_deposit_address_this_stripe_account_does_not_hold_is_never_offered(
+    settings, store, fake_renderer, tempo_config, chain, addresses, capsys
+):
+    payments = FakePayments()
+    payments.deposit_addresses = addresses
+    provider = StripeCredits(tempo_config, client=payments.client, tempo_transport=chain.transport)
+    raw, key = store.create_key("free")
+    with make_client(settings, store, fake_renderer, provider) as c:
+        r = ask(c, raw)
+        assert r.json()["error"]["methods"] == ["stripe"]
+    assert "tempo deposit address not verified" in capsys.readouterr().out
+    assert not provider.tempo_ready()  # asked again only after five minutes
+
+
+def test_a_tempo_credential_is_refused_while_the_address_is_unverified(tclient, tcredits, store, chain, payments):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    tcredits._tempo_verified, tcredits._tempo_next_check = False, time.monotonic() + 300
+    r = send(tclient, raw, credential(params, {"type": "hash", "hash": pushed_transfer(chain, params)}))
+    assert r.status_code == 402 and r.json()["error"]["methods"] == ["stripe"]
+    assert store.list_credit_purchases(key.id) == []
+
+
+# --- one challenge, one transfer (FR-26 #4) ----------------------------------------------------------------
+
+
+def test_a_second_signed_transfer_for_a_paid_challenge_is_not_sent(tclient, store, chain):
+    raw, key = store.create_key("free")
+    params, _, first = pay_tempo(tclient, chain, raw)
+    assert first.status_code == 200
+    second = credential(params, {"type": "transaction", "signature": signed_transfer(chain, params, nonce=1)})
+    r = send(tclient, raw, second)
+    assert r.status_code == 409 and r.json()["error"]["code"] == "payment_conflict"
+    assert "nothing moved" in r.json()["error"]["message"]
+    assert len(chain.sent) == 1 and store.get_credit_balance(key.id) == 5000
+
+
+def test_two_signed_transfers_for_one_challenge_at_once_only_one_is_sent(tclient, store, chain):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    headers = [
+        credential(params, {"type": "transaction", "signature": signed_transfer(chain, params, nonce=n)})
+        for n in range(4)
+    ]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda h: send(tclient, raw, h), headers))
+    assert sorted(r.status_code for r in results) == [200, 409, 409, 409], [r.text for r in results]
+    assert len(chain.sent) == 1 and store.get_credit_balance(key.id) == 5000
+    assert len(store.list_credit_purchases(key.id)) == 1
+
+
+def test_a_second_pushed_transfer_is_recorded_unmatched_and_can_be_refunded(
+    tclient, store, chain, payments, admin_payments_from, capsys
+):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    first = send(tclient, raw, credential(params, {"type": "hash", "hash": pushed_transfer(chain, params)}))
+    assert first.status_code == 200
+    other = pushed_transfer(chain, params, tx_hash="0x" + "cd" * 32)  # the buyer paid the same challenge twice
+    r = send(tclient, raw, credential(params, {"type": "hash", "hash": other}))
+    assert r.status_code == 409 and "recorded so that it can be refunded" in r.json()["error"]["message"]
+    purchase = store.get_credit_purchase(other)
+    assert (purchase.status, purchase.challenge_id) == ("unmatched", "")
+    assert store.get_credit_balance(key.id) == 5000
+    # The retry of the first credential still answers with the first transfer.
+    again = send(tclient, raw, credential(params, {"type": "hash", "hash": "0x" + "ab" * 32}))
+    assert again.status_code == 200 and again.json()["payment"]["reference"] == "0x" + "ab" * 32
+
+    admin_payments_from(payments)
+    assert admin.main(["record-tempo", other]) == 0
+    assert admin.main(["refund-credit", other, "--yes", "--prorated"]) == 0
+    refund = payments.refunds[-1].kwargs["params"]
+    assert refund["amount"] == 1900 and refund["payment_intent"] == store.get_credit_purchase(other).payment_intent
+    assert store.get_credit_balance(key.id) == 5000  # the first purchase's credit is untouched
+    assert "no credit is taken back" not in capsys.readouterr().err
+
+
+def test_claims_belong_to_one_attempt(store):
+    import asyncio
+
+    first, second = tempo.ClaimStore(store, "ch_1"), tempo.ClaimStore(store, "ch_1")
+
+    async def run():
+        assert await first.put_if_absent("mpp:charge:0xab", "0xab") is True
+        assert await second.put_if_absent("mpp:charge:0xab", "0xab") is False  # the same challenge, another attempt
+        assert await second.get("mpp:charge:0xab") == "0xab" and await first.get("mpp:charge:0xab") is None
+        await second.delete("mpp:charge:0xab")  # a failing attempt releases only its own claim
+        assert store.get_payment_claim("mpp:charge:0xab") is not None
+
+    asyncio.run(run())
+
+
+def test_settling_on_an_event_loop_is_refused(tcredits):
+    import asyncio
+
+    async def on_the_loop():
+        with pytest.raises(RuntimeError, match="worker thread"):
+            tcredits._tempo.lookup("0x" + "ab" * 32, {}, None)
+
+    asyncio.run(on_the_loop())
 
 
 # --- the webhook ---------------------------------------------------------------------------------------------
@@ -695,34 +1002,72 @@ def test_the_webhook_links_the_payment_intent_and_credits_nothing_twice(
     assert store.get_credit_purchase(tx_hash).payment_intent == "pi_test_1"
 
 
-def test_the_webhook_alone_credits_a_tempo_payment_under_its_hash(settings, store, fake_renderer, tcredits, billing,
-                                                                  payments):
-    """A server stopped after Stripe recorded the payment and before the credit was written."""
+def tempo_intent(key_id: int, tx_hash: str, intent_id: str = "pi_hook_tempo", charged: str | None = None) -> dict:
+    """A succeeded crypto PaymentIntent, as Stripe returns it. ``charged``: the transaction Stripe verified."""
+    return {
+        "id": intent_id, "object": "payment_intent", "status": "succeeded", "amount": 1900,
+        "amount_received": 1900, "currency": "usd", "payment_method_types": ["crypto"],
+        "latest_charge": crypto_charge(charged or tx_hash),
+        "metadata": {"calotype_key_id": str(key_id), "calotype_credit_pack": "starter",
+                     "calotype_credit_screenshots": "5000", "calotype_tempo_tx": tx_hash, "mpp_challenge_id": "ch"},
+    }
+
+
+def test_a_webhook_with_tempo_metadata_alone_credits_nothing(settings, store, fake_renderer, tcredits, billing,
+                                                             payments):
+    """FR-26 #3: a succeeded PaymentIntent whose metadata names a key, a pack and a transaction this server never
+    bound creates no purchase."""
     raw, key = store.create_key("free")
     tx_hash = "0x" + "cd" * 32
-    payments.intents["pi_hook_tempo"] = {
-        "id": "pi_hook_tempo", "object": "payment_intent", "status": "succeeded", "amount": 1900,
-        "amount_received": 1900, "currency": "usd",
-        "metadata": {"calotype_key_id": str(key.id), "calotype_credit_pack": "starter",
-                     "calotype_credit_screenshots": "5000", "calotype_tempo_tx": tx_hash.upper().replace("0X", "0x"),
-                     "mpp_challenge_id": "ch"},
-    }
+    payments.intents["pi_hook_tempo"] = tempo_intent(key.id, tx_hash)
     with make_client(settings, store, fake_renderer, tcredits, billing) as c:
         hook = post_event(c, event("evt_tempo_2", "payment_intent.succeeded", payments.intents["pi_hook_tempo"]))
-        replay = post_event(c, event("evt_tempo_3", "payment_intent.succeeded", payments.intents["pi_hook_tempo"]))
-    assert hook.json()["outcome"] == "credited" and replay.json()["outcome"] == "already_credited"
-    purchase = store.get_credit_purchase(tx_hash)
-    assert (purchase.method, purchase.payment_intent, purchase.key_id) == ("tempo", "pi_hook_tempo", key.id)
+    assert hook.json()["outcome"] == "ignored"
+    assert store.get_credit_purchase(tx_hash) is None and store.get_credit_balance(key.id) == 0
+
+
+def test_a_webhook_for_another_transaction_cannot_link_or_credit_a_purchase(
+    settings, store, fake_renderer, tcredits, billing, chain, payments
+):
+    """The metadata names our purchase, but the transaction Stripe verified is another one."""
+    raw, key = store.create_key("free")
+    payments.fail_with = stripe.APIConnectionError("down")  # recording fails: the purchase is paid, unlinked
+    with make_client(settings, store, fake_renderer, tcredits, billing) as c:
+        _, header, r = pay_tempo(c, chain, raw)
+        tx_hash = r.json()["payment"]["reference"]
+        payments.intents["pi_wrong"] = tempo_intent(key.id, tx_hash, "pi_wrong", charged="0x" + "77" * 32)
+        wrong = post_event(c, event("evt_wrong", "payment_intent.succeeded", payments.intents["pi_wrong"]))
+        assert wrong.json()["outcome"] == "ignored"
+        assert store.get_credit_purchase(tx_hash).payment_intent is None and store.get_credit_balance(key.id) == 0
+
+        payments.intents["pi_right"] = tempo_intent(key.id, tx_hash, "pi_right")
+        right = post_event(c, event("evt_right", "payment_intent.succeeded", payments.intents["pi_right"]))
+        assert right.json()["outcome"] == "credited"
+        payments.fail_with = None
+        assert send(c, raw, header).json()["already_credited"] is True
+    assert store.get_credit_purchase(tx_hash).payment_intent == "pi_right"
+    assert store.get_credit_balance(key.id) == 5000 and payments.create.call_count == 1
+
+
+def test_the_webhook_credits_a_payment_stripe_settled_after_the_request(
+    settings, store, fake_renderer, tcredits, billing, chain, payments
+):
+    raw, key = store.create_key("free")
+    payments.crypto_status = "processing"
+    with make_client(settings, store, fake_renderer, tcredits, billing) as c:
+        _, header, r = pay_tempo(c, chain, raw)
+        assert r.status_code == 202
+        payments.settle_crypto("pi_test_1")
+        hook = post_event(c, event("evt_late", "payment_intent.succeeded", payments.intents["pi_test_1"]))
+        assert hook.json()["outcome"] == "credited"
+        again = send(c, raw, header)
+    assert again.status_code == 200 and again.json()["already_credited"] is True
     assert store.get_credit_balance(key.id) == 5000
 
 
 def test_the_webhook_ignores_a_bad_transaction_hash(settings, store, fake_renderer, tcredits, billing, payments):
     raw, key = store.create_key("free")
-    payments.intents["pi_bad"] = {
-        "id": "pi_bad", "object": "payment_intent", "status": "succeeded", "amount": 1900, "amount_received": 1900,
-        "currency": "usd", "metadata": {"calotype_key_id": str(key.id), "calotype_credit_pack": "starter",
-                                        "calotype_credit_screenshots": "5000", "calotype_tempo_tx": "0x/../x"},
-    }
+    payments.intents["pi_bad"] = tempo_intent(key.id, "0x/../x", "pi_bad")
     with make_client(settings, store, fake_renderer, tcredits, billing) as c:
         hook = post_event(c, event("evt_bad", "payment_intent.succeeded", payments.intents["pi_bad"]))
     assert hook.json()["outcome"] == "ignored" and store.get_credit_balance(key.id) == 0
@@ -736,6 +1081,17 @@ def admin_payments(monkeypatch) -> FakePayments:
     fake = FakePayments()
     monkeypatch.setattr(admin, "open_credits", lambda: credits_for_admin({"STRIPE_SECRET_KEY": SECRET_KEY}, client=fake.client))
     return fake
+
+
+@pytest.fixture
+def admin_payments_from(monkeypatch, tcredits, store):
+    """The admin CLI over the app's own provider (its Stripe stand-in and its chain) and the app's store."""
+
+    def use(payments):
+        monkeypatch.setattr(admin, "open_credits", lambda: tcredits)
+        monkeypatch.setattr(admin, "open_configured_storage", lambda settings: store)
+
+    return use
 
 
 TX = "0x" + "ef" * 32
