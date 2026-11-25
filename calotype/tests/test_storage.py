@@ -728,12 +728,25 @@ def test_an_unmatched_purchase_adds_nothing(store):
     ) == (False, 0)
 
 
-def test_a_refund_amount_is_fixed_once(store):
+def test_a_refund_amount_is_fixed_with_the_refund_itself(store):
+    """FR-26 re-check #5: the amount is fixed in the same step that takes the credit back, so a run that stops
+    between the two cannot change the first decision; a later call, prorated or not, keeps it."""
     _, key = store.create_key("free")
-    store.add_credit_purchase("pi_r", key.id, pack="starter", screenshots=10, amount_cents=1900, currency="usd")
-    assert store.set_credit_refund_amount("pi_r", 1900) is None  # not refunded yet
-    store.refund_credit_purchase("pi_r")
-    assert store.set_credit_refund_amount("pi_r", 1425) == 1425
-    assert store.set_credit_refund_amount("pi_r", 1900) == 1425
+    store.add_credit_purchase("pi_r", key.id, pack="starter", screenshots=100, amount_cents=1900, currency="usd")
+    assert store.consume_credit(key.id) == (True, 99)
+    assert store.get_credit_purchase("pi_r").refund_amount_cents is None  # not refunded yet
+    purchase, changed = store.refund_credit_purchase("pi_r", prorated=True)
+    assert changed and (purchase.credits_removed, purchase.refund_amount_cents) == (99, 1881)
+    again, changed = store.refund_credit_purchase("pi_r", prorated=False)
+    assert not changed and again.refund_amount_cents == 1881
+    assert store.get_credit_purchase("pi_r").refund_amount_cents == 1881
     purchase = store.update_credit_purchase("pi_r", {"refund_status": "pending"})
-    assert (purchase.refund_amount_cents, purchase.refund_status, purchase.status) == (1425, "pending", "credited")
+    assert (purchase.refund_amount_cents, purchase.refund_status, purchase.status) == (1881, "pending", "credited")
+
+
+def test_a_purchase_never_credited_is_refunded_in_full_even_prorated(store):
+    _, key = store.create_key("free")
+    store.add_credit_purchase(TX_A, key.id, pack="starter", screenshots=5000, amount_cents=1900, currency="usd",
+                              method="tempo", status="unmatched")
+    purchase, _ = store.refund_credit_purchase(TX_A, prorated=True)
+    assert (purchase.credits_removed, purchase.refund_amount_cents) == (0, 1900)

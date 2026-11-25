@@ -843,8 +843,9 @@ def test_a_declined_payment_intent_is_not_credited_and_a_new_one_is_made_only_on
 
 
 @pytest.mark.parametrize("stripe_made_it", [False, True], ids=["nothing-made", "made-before-the-500"])
-def test_a_stripe_500_is_searched_for_before_a_new_idempotency_key(tclient, store, chain, payments, stripe_made_it):
-    """Stripe's idempotency layer replays a 500 for the same key. Search after a while, then use a new key."""
+def test_a_stripe_500_is_reconciled_before_a_new_idempotency_key(tclient, store, chain, payments, stripe_made_it):
+    """Stripe's idempotency layer replays a 500 for the same key. List what Stripe made after a while (a list is
+    read-after-write; search is not), then use a new key only if it made nothing."""
     raw, key = store.create_key("free")
     original = payments._create
 
@@ -860,13 +861,13 @@ def test_a_stripe_500_is_searched_for_before_a_new_idempotency_key(tclient, stor
     purchase = store.get_credit_purchase(tx_hash)
     assert purchase.stripe_attempt == 1 and purchase.stripe_retry_at
     payments.client.v1.payment_intents.create.side_effect = original
-    assert send(tclient, raw, header).status_code == 202  # too soon to search: nothing new is made
-    assert payments.create.call_count == 1 and not payments.client.v1.payment_intents.search.called
+    assert send(tclient, raw, header).status_code == 202  # too soon to reconcile: nothing new is made
+    assert payments.create.call_count == 1 and not payments.client.v1.payment_intents.list.called
 
-    store.update_credit_purchase(tx_hash, {"stripe_retry_at": "2000-01-01T00:00:00+00:00"})
+    store.update_credit_purchase(tx_hash, {"stripe_retry_at": datetime.now(UTC).isoformat(timespec="seconds")})
     r = send(tclient, raw, header)
     assert r.status_code == 200, r.text
-    assert payments.client.v1.payment_intents.search.called
+    assert payments.client.v1.payment_intents.list.called and not payments.client.v1.payment_intents.search.called
     if stripe_made_it:
         assert payments.create.call_count == 1 and len(payments.intents) == 1  # found, not made twice
     else:
@@ -1097,17 +1098,20 @@ def admin_payments_from(monkeypatch, tcredits, store):
 TX = "0x" + "ef" * 32
 
 
-def bought_in_usdc(store, payment_intent: str | None = "pi_tempo_1"):
+def bought_in_usdc(store, payment_intent: str | None = "pi_tempo_1", payments: FakePayments | None = None):
+    """A credited Tempo purchase. With ``payments``, Stripe holds its settled PaymentIntent."""
     _, key = store.create_key("free")
     store.add_credit_purchase(
         TX, key.id, pack="starter", screenshots=5000, amount_cents=1900, currency="usd", challenge_id="ch",
         method="tempo", payment_intent=payment_intent,
     )
+    if payments is not None and payment_intent:
+        payments.intents[payment_intent] = tempo_intent(key.id, TX, payment_intent)
     return key
 
 
 def test_a_tempo_purchase_is_refunded_through_its_payment_intent(admin_store, admin_payments, capsys):
-    key = bought_in_usdc(admin_store)
+    key = bought_in_usdc(admin_store, payments=admin_payments)
     assert admin.main(["refund-credit", TX.upper().replace("0X", "0x"), "--yes"]) == 0
     refund = admin_payments.refunds[0].kwargs
     assert refund["params"]["payment_intent"] == "pi_tempo_1" and refund["params"]["amount"] == 1900
@@ -1204,3 +1208,439 @@ def test_with_usdc_off_the_pages_do_not_offer_it(settings, store, fake_renderer,
         assert "<!--usdc" not in text and "<!--nousdc" not in text, path
         assert "USDC" not in text and "Tempo" not in text, path
     assert "Stablecoin payment is not offered on this server." in texts["/docs"]
+
+
+# --- FR-26 re-check #1: a transfer the buyer broadcast is never stranded at expiry -------------------------------
+
+
+def test_a_pushed_hash_sent_before_its_receipt_was_visible_is_credited_after_expiry(tclient, store, chain, monkeypatch):
+    """The hash came before the node had its receipt (502, nothing bound). The transfer settles; the same
+    credential, sent after the challenge expired, is looked up by its hash and credited, never a fresh 402."""
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    tx_hash = "0x" + "a1" * 32
+    header = credential(params, {"type": "hash", "hash": tx_hash})
+    early = send(tclient, raw, header)
+    assert early.status_code == 502 and early.json()["error"]["code"] == "payment_unconfirmed"
+    assert store.list_credit_purchases(key.id) == []
+
+    pushed_transfer(chain, params, tx_hash=tx_hash)  # now on the chain
+    expire_challenges(monkeypatch)
+    r = send(tclient, raw, header)
+    assert r.status_code == 200, r.text
+    assert r.json()["already_credited"] is False and r.json()["payment"]["reference"] == tx_hash
+    purchase = store.get_credit_purchase(tx_hash)
+    assert (purchase.status, purchase.challenge_id, purchase.amount_cents) == ("credited", params["id"], 1900)
+    assert store.get_credit_balance(key.id) == 5000 and chain.sent == []
+    assert send(tclient, raw, header).json()["already_credited"] is True  # and once only
+
+
+def test_a_pushed_hash_whose_binding_failed_is_credited_after_expiry(tclient, store, chain, monkeypatch):
+    """The chain check passed, then storage failed before the challenge was bound."""
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    header = credential(params, {"type": "hash", "hash": pushed_transfer(chain, params)})
+    real = store.bind_tempo_payment
+    monkeypatch.setattr(store, "bind_tempo_payment", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stopped")))
+    with pytest.raises(RuntimeError):
+        send(tclient, raw, header)
+    assert store.list_credit_purchases(key.id) == []
+    monkeypatch.setattr(store, "bind_tempo_payment", real)
+    expire_challenges(monkeypatch)
+    r = send(tclient, raw, header)
+    assert r.status_code == 200, r.text
+    assert store.get_credit_balance(key.id) == 5000
+
+
+def test_a_pushed_hash_first_sent_after_expiry_is_credited(tclient, store, chain, payments, monkeypatch):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    header = credential(params, {"type": "hash", "hash": pushed_transfer(chain, params)})
+    expire_challenges(monkeypatch)
+    r = send(tclient, raw, header)
+    assert r.status_code == 200, r.text
+    assert store.get_credit_balance(key.id) == 5000 and payments.create.call_count == 1
+
+
+def test_after_expiry_a_pushed_hash_not_on_the_chain_is_unconfirmed_and_bound_to_nothing(
+    tclient, store, chain, monkeypatch
+):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    expire_challenges(monkeypatch)
+    r = send(tclient, raw, credential(params, {"type": "hash", "hash": "0x" + "a2" * 32}))
+    assert r.status_code == 502 and r.json()["error"]["code"] == "payment_unconfirmed"
+    assert "www-authenticate" not in r.headers  # not "pay again": it may still land
+    assert store.list_credit_purchases(key.id) == [] and chain.sent == []
+
+
+@pytest.mark.parametrize(
+    "log",
+    [{"memo": "0x" + "00" * 31 + "01"}, {"amount": PRICE - 1}, {"recipient": OTHER_ADDRESS}],
+    ids=["foreign-memo", "underpays", "wrong-recipient"],
+)
+def test_after_expiry_a_pushed_hash_that_does_not_pay_the_challenge_is_refused(tclient, store, chain, monkeypatch,
+                                                                              log):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    header = credential(params, {"type": "hash", "hash": pushed_transfer(chain, params, **log)})
+    expire_challenges(monkeypatch)
+    assert_refused(send(tclient, raw, header), "verification_failed")
+    assert store.list_credit_purchases(key.id) == [] and store.get_credit_balance(key.id) == 0
+
+
+def test_after_expiry_a_second_pushed_hash_takes_nothing_from_the_first(tclient, store, chain, monkeypatch):
+    """Two transfers for one challenge, both first sent after expiry: the first binds, the second is unmatched."""
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    first = pushed_transfer(chain, params)
+    second = pushed_transfer(chain, params, tx_hash="0x" + "cd" * 32)
+    expire_challenges(monkeypatch)
+    assert send(tclient, raw, credential(params, {"type": "hash", "hash": first})).status_code == 200
+    r = send(tclient, raw, credential(params, {"type": "hash", "hash": second}))
+    assert r.status_code == 409 and store.get_credit_purchase(second).status == "unmatched"
+    assert store.get_credit_balance(key.id) == 5000
+
+
+def test_after_expiry_a_signed_transfer_never_bound_is_refused_and_never_sent(tclient, store, chain, monkeypatch):
+    """What the README promises: a signed transfer this server never bound was never sent by it, so nothing moved;
+    after expiry it is refused (402 payment_expired) rather than broadcast."""
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    header = credential(params, {"type": "transaction", "signature": signed_transfer(chain, params)})
+    expire_challenges(monkeypatch)
+    assert_refused(send(tclient, raw, header), "payment_expired")
+    assert chain.sent == [] and chain.calls == [] and store.list_credit_purchases(key.id) == []
+
+
+# --- FR-26 re-check #2: the admin CLI's own provider can move every purchase on -----------------------------------
+
+
+@pytest.fixture
+def cli_provider(monkeypatch, store, payments, chain):
+    """The admin CLI as deployed: ``admin.open_credits`` is ``credits_for_admin`` reading the environment. Only
+    the network is replaced: Stripe's client by ``payments``, the Tempo node by ``chain``."""
+    from calotype import credits as credits_module
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", SECRET_KEY)
+    monkeypatch.setenv("STRIPE_TEMPO_DEPOSIT_ADDRESS", DEPOSIT)
+    monkeypatch.delenv("CALOTYPE_TEMPO_RPC_URL", raising=False)
+    monkeypatch.setattr(stripe, "StripeClient", lambda *a, **k: payments.client)
+    real_init = tempo.TempoMethod.__init__
+    monkeypatch.setattr(
+        tempo.TempoMethod, "__init__", lambda self, config, transport=None: real_init(self, config, transport=chain.transport)
+    )
+    monkeypatch.setattr(admin, "open_credits", credits_module.credits_for_admin)
+    monkeypatch.setattr(admin, "open_configured_storage", lambda settings: store)
+
+
+def test_record_tempo_moves_a_pending_purchase_on_with_the_clis_own_provider(
+    tclient, tcredits, store, chain, payments, monkeypatch, cli_provider
+):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    signed = signed_transfer(chain, params)
+    lose_the_broadcast(monkeypatch, tcredits, chain, lands=False)
+    assert send(tclient, raw, credential(params, {"type": "transaction", "signature": signed})).status_code == 202
+    tx_hash = tx_hash_of(signed)
+    assert store.get_credit_purchase(tx_hash).status == "pending"
+    chain.receipts[tx_hash] = receipt(tx_hash, chain.effects[tx_hash])  # it landed after all
+    assert admin.main(["record-tempo", tx_hash]) == 0
+    purchase = store.get_credit_purchase(tx_hash)
+    assert (purchase.status, purchase.payment_intent) == ("credited", "pi_test_1")
+    assert store.get_credit_balance(key.id) == 5000 and chain.count("eth_sendRawTransactionSync") == 0
+
+
+def test_record_tempo_moves_a_paid_purchase_on_with_the_clis_own_provider(tclient, store, chain, payments,
+                                                                          cli_provider):
+    raw, key = store.create_key("free")
+    payments.fail_with = stripe.APIConnectionError("no connection")
+    _, _, r = pay_tempo(tclient, chain, raw)
+    tx_hash = r.json()["payment"]["reference"]
+    assert store.get_credit_purchase(tx_hash).status == "paid"
+    payments.fail_with = None
+    assert admin.main(["record-tempo", tx_hash]) == 0
+    assert store.get_credit_purchase(tx_hash).status == "credited" and store.get_credit_balance(key.id) == 5000
+
+
+def test_record_tempo_again_replaces_a_declined_payment_intent_with_the_clis_own_provider(
+    tclient, store, chain, payments, cli_provider
+):
+    raw, key = store.create_key("free")
+    payments.crypto_status = "requires_payment_method"
+    _, _, r = pay_tempo(tclient, chain, raw)
+    tx_hash = r.json()["payment"]["reference"]
+    payments.crypto_status = "succeeded"
+    assert admin.main(["record-tempo", tx_hash]) == 1  # still declined: not replaced without --again
+    assert admin.main(["record-tempo", tx_hash, "--again"]) == 0
+    assert payments.create.call_args.kwargs["options"]["idempotency_key"] == f"calotype_tempo_{tx_hash}_1"
+    assert store.get_credit_purchase(tx_hash).payment_intent == "pi_test_2"
+    assert store.get_credit_balance(key.id) == 5000
+
+
+def test_record_tempo_without_tempo_settings_says_so_and_changes_nothing(
+    tclient, tcredits, store, chain, payments, monkeypatch, cli_provider, capsys
+):
+    raw, key = store.create_key("free")
+    params = tempo_params(ask(tclient, raw))
+    signed = signed_transfer(chain, params)
+    lose_the_broadcast(monkeypatch, tcredits, chain, lands=False)
+    assert send(tclient, raw, credential(params, {"type": "transaction", "signature": signed})).status_code == 202
+    monkeypatch.delenv("STRIPE_TEMPO_DEPOSIT_ADDRESS")
+    capsys.readouterr()
+    assert admin.main(["record-tempo", tx_hash_of(signed)]) == 1
+    err = capsys.readouterr().err
+    assert "STRIPE_TEMPO_DEPOSIT_ADDRESS" in err and "Nothing was changed" in err
+    assert store.get_credit_purchase(tx_hash_of(signed)).status == "pending" and payments.create.call_count == 0
+
+
+# --- FR-26 re-check #3: a webhook that cannot finish is not acknowledged ------------------------------------------
+
+
+@pytest.mark.parametrize("fault", ["chain-down", "stripe-down"])
+def test_a_webhook_that_cannot_advance_its_purchase_is_retried_and_its_redelivery_credits(
+    settings, store, fake_renderer, tcredits, billing, chain, payments, monkeypatch, fault
+):
+    raw, key = store.create_key("free")
+    with make_client(settings, store, fake_renderer, tcredits, billing) as c:
+        params = tempo_params(ask(c, raw))
+        signed = signed_transfer(chain, params)
+        tx_hash = tx_hash_of(signed)
+        if fault == "chain-down":
+            # The broadcast's receipt was lost (the transfer landed); Stripe settles a PaymentIntent for it; the
+            # node is down when the event arrives.
+            lose_the_broadcast(monkeypatch, tcredits, chain, lands=False)
+            assert send(c, raw, credential(params, {"type": "transaction", "signature": signed})).status_code == 202
+            chain.receipts[tx_hash] = receipt(tx_hash, chain.effects[tx_hash])  # it landed after all
+            payments.intents["pi_hook_tempo"] = tempo_intent(key.id, tx_hash)
+            intent_id = "pi_hook_tempo"
+            chain.down = True
+        else:
+            # Stripe settles after the request answered 202; reading the PaymentIntent again fails once.
+            payments.crypto_status = "processing"
+            assert send(c, raw, credential(params, {"type": "transaction", "signature": signed})).status_code == 202
+            payments.settle_crypto("pi_test_1")
+            intent_id, calls = "pi_test_1", []
+            real = payments._retrieve
+
+            def flaky(intent, params=None):
+                calls.append(intent)
+                if len(calls) == 2:
+                    raise stripe.APIConnectionError("no connection")
+                return real(intent, params)
+
+            payments.client.v1.payment_intents.retrieve.side_effect = flaky
+        hook = event("evt_retry_me", "payment_intent.succeeded", payments.intents[intent_id])
+        first = post_event(c, hook)
+        assert first.status_code == 500, first.text  # not acknowledged: Stripe delivers it again
+        assert not store.event_processed("evt_retry_me") and store.get_credit_balance(key.id) == 0
+        chain.down = False
+        again = post_event(c, hook)
+        assert again.status_code == 200 and again.json()["outcome"] == "credited"
+        assert post_event(c, hook).json()["outcome"] == "duplicate"
+    assert store.get_credit_balance(key.id) == 5000
+
+
+def test_a_webhook_for_a_purchase_refunded_before_settlement_is_acknowledged(
+    settings, store, fake_renderer, tcredits, billing, chain, payments, admin_payments_from
+):
+    raw, key = store.create_key("free")
+    payments.crypto_status = "processing"
+    with make_client(settings, store, fake_renderer, tcredits, billing) as c:
+        _, _, r = pay_tempo(c, chain, raw)
+        tx_hash = r.json()["payment"]["reference"]
+        store.refund_credit_purchase(tx_hash)
+        payments.settle_crypto("pi_test_1")
+        hook = post_event(c, event("evt_refunded", "payment_intent.succeeded", payments.intents["pi_test_1"]))
+    assert hook.status_code == 200 and hook.json()["outcome"] == "ignored"
+    assert store.get_credit_balance(key.id) == 0
+
+
+# --- FR-26 re-check #4: the PaymentIntent that settled the transfer is the one that counts ------------------------
+
+
+def test_a_stripe_500_whose_payment_intent_search_cannot_see_yet_is_not_replaced(tclient, store, chain, payments):
+    """Stripe made the PaymentIntent and answered 500; its search index has not caught up. A list sees it."""
+    raw, key = store.create_key("free")
+    original = payments._create
+
+    def failing(params, options=None):
+        original(params, options)
+        raise stripe.APIError("internal", http_status=500)
+
+    payments.client.v1.payment_intents.create.side_effect = failing
+    payments.client.v1.payment_intents.search.side_effect = lambda params: {"object": "search_result", "data": []}
+    _, header, r = pay_tempo(tclient, chain, raw)
+    tx_hash = r.json()["payment"]["reference"]
+    payments.client.v1.payment_intents.create.side_effect = original
+    store.update_credit_purchase(tx_hash, {"stripe_retry_at": datetime.now(UTC).isoformat(timespec="seconds")})
+    assert send(tclient, raw, header).status_code == 200
+    assert payments.create.call_count == 1 and list(payments.intents) == ["pi_test_1"]
+    assert store.get_credit_purchase(tx_hash).payment_intent == "pi_test_1"
+
+
+def test_a_late_settlement_of_an_unknown_attempt_takes_the_place_of_its_declined_replacement(
+    settings, store, fake_renderer, tcredits, billing, chain, payments, capsys
+):
+    """The first recording got a 500 and Stripe made nothing visible; a replacement (key _1) was made. Then Stripe
+    finished the first one after all: it settles the transfer, and the replacement is declined (one transfer
+    settles once). The first one's success event credits the purchase instead of being ignored."""
+    raw, key = store.create_key("free")
+    original = payments._create
+    payments.client.v1.payment_intents.create.side_effect = lambda params, options=None: (_ for _ in ()).throw(
+        stripe.APIError("gateway timeout", http_status=504)
+    )
+    with make_client(settings, store, fake_renderer, tcredits, billing) as c:
+        params = tempo_params(ask(c, raw))
+        header = credential(params, {"type": "transaction", "signature": signed_transfer(chain, params)})
+        r = send(c, raw, header)
+        tx_hash = r.json()["payment"]["reference"]
+        payments.client.v1.payment_intents.create.side_effect = original
+        payments.crypto_status = "processing"
+        store.update_credit_purchase(tx_hash, {"stripe_retry_at": datetime.now(UTC).isoformat(timespec="seconds")})
+        assert send(c, raw, header).status_code == 202  # nothing listed: the replacement is made
+        assert store.get_credit_purchase(tx_hash).payment_intent == "pi_test_1"
+
+        payments.intents["pi_late"] = tempo_intent(key.id, tx_hash, "pi_late")  # the first attempt, settled
+        payments.settle_crypto("pi_test_1", "canceled")
+        hook = post_event(c, event("evt_late_first", "payment_intent.succeeded", payments.intents["pi_late"]))
+        assert hook.status_code == 200 and hook.json()["outcome"] == "credited"
+        purchase = store.get_credit_purchase(tx_hash)
+        assert (purchase.status, purchase.payment_intent) == ("credited", "pi_late")
+
+        # Had the replacement settled too, its event would credit nothing more, and say so.
+        payments.settle_crypto("pi_test_1")
+        dup = post_event(c, event("evt_second_settlement", "payment_intent.succeeded", payments.intents["pi_test_1"]))
+        assert dup.json()["outcome"] == "ignored"
+    assert store.get_credit_balance(key.id) == 5000
+    assert "a second stripe settlement of a tempo transaction" in capsys.readouterr().out
+
+
+def test_a_webhook_does_not_replace_a_payment_intent_that_settled_the_transfer(
+    settings, store, fake_renderer, tcredits, billing, chain, payments
+):
+    raw, key = store.create_key("free")
+    with make_client(settings, store, fake_renderer, tcredits, billing) as c:
+        _, _, r = pay_tempo(c, chain, raw)
+        tx_hash = r.json()["payment"]["reference"]
+        payments.intents["pi_other"] = tempo_intent(key.id, tx_hash, "pi_other")
+        hook = post_event(c, event("evt_other", "payment_intent.succeeded", payments.intents["pi_other"]))
+    assert hook.json()["outcome"] == "ignored"
+    assert store.get_credit_purchase(tx_hash).payment_intent == "pi_test_1" and store.get_credit_balance(key.id) == 5000
+
+
+@pytest.mark.parametrize("status", ["processing", "requires_payment_method"])
+def test_a_tempo_refund_goes_only_through_a_payment_intent_that_settled_the_transfer(
+    tclient, store, chain, payments, admin_payments_from, capsys, status
+):
+    raw, key = store.create_key("free")
+    payments.crypto_status = status
+    _, _, r = pay_tempo(tclient, chain, raw)
+    tx_hash = r.json()["payment"]["reference"]
+    admin_payments_from(payments)
+    capsys.readouterr()
+    assert admin.main(["refund-credit", tx_hash, "--yes"]) == 1
+    assert "is not Stripe's settlement" in capsys.readouterr().err
+    assert payments.refunds == [] and store.get_credit_purchase(tx_hash).refunded_at is None  # nothing changed
+
+
+# --- lower: the pinned SDK's private calls, and the deposit address checked again ---------------------------------
+
+
+def test_the_sdk_is_the_version_its_private_calls_were_read_in():
+    from importlib.metadata import version
+    from pathlib import Path
+
+    assert version("pympp") == tempo.PYMPP_VERSION == "0.26.0"
+    pins = (Path(__file__).resolve().parents[1] / "requirements.txt").read_text()
+    assert f"pympp=={tempo.PYMPP_VERSION}" in pins.splitlines()
+
+
+LOOKUP_PARAMS = {"id": "ch_lookup", "realm": "testserver"}
+
+
+def lookup_terms(config, amount_cents: int = 1900) -> dict:
+    return {"request": tempo.charge_request(config, amount_cents), "realm": "testserver", "challenge_id": "ch_lookup"}
+
+
+@pytest.mark.parametrize(
+    "receipt_status, log, expected",
+    [
+        ("0x1", {}, tempo.CHAIN_PAID),
+        ("0x0", {}, tempo.CHAIN_FAILED),  # reverted
+        ("0x1", {"memo": "0x" + "00" * 31 + "01"}, tempo.CHAIN_FAILED),  # another challenge's memo
+        ("0x1", {"amount": PRICE - 1}, tempo.CHAIN_FAILED),
+        ("0x1", {"recipient": OTHER_ADDRESS}, tempo.CHAIN_FAILED),
+        ("0x1", {"token": OTHER_TOKEN}, tempo.CHAIN_FAILED),
+    ],
+    ids=["paid", "reverted", "foreign-memo", "underpays", "wrong-recipient", "wrong-token"],
+)
+def test_lookup_checks_a_receipt_with_the_pinned_sdk(tempo_config, chain, receipt_status, log, expected):
+    method = tempo.TempoMethod(tempo_config.tempo, transport=chain.transport)
+    tx_hash = "0x" + "b1" * 32
+    memo = log.pop("memo", memo_for(LOOKUP_PARAMS))
+    chain.receipts[tx_hash] = receipt(tx_hash, [transfer_log(memo=memo, **log)], status=receipt_status)
+    assert method.lookup(tx_hash, lookup_terms(tempo_config.tempo), None) == expected
+    assert chain.sent == []  # a lookup never sends
+
+
+def test_lookup_without_a_receipt_is_pending_until_chain_time_passes_valid_before(tempo_config, chain):
+    method = tempo.TempoMethod(tempo_config.tempo, transport=chain.transport)
+    tx_hash, now = "0x" + "b2" * 32, int(time.time())
+    terms = lookup_terms(tempo_config.tempo)
+    assert method.lookup(tx_hash, terms, None) == tempo.CHAIN_PENDING  # pushed: no valid_before known
+    assert method.lookup(tx_hash, terms, now + 300) == tempo.CHAIN_PENDING
+    chain.block_time = now + 301
+    assert method.lookup(tx_hash, terms, now + 300) == tempo.CHAIN_FAILED
+
+
+def test_lookup_ignores_the_challenges_expiry_and_refuses_a_node_on_another_chain(tempo_config):
+    """The receipt check has no expiry in it: terms of a challenge that expired long ago still look up. A node
+    on another chain is never answered for."""
+    method = tempo.TempoMethod(tempo_config.tempo, transport=FakeChain(chain_id=tempo.LIVE_CHAIN_ID).transport)
+    with pytest.raises(tempo.Unconfirmed):
+        method.lookup("0x" + "b3" * 32, lookup_terms(tempo_config.tempo), None)
+    chain = FakeChain()
+    method = tempo.TempoMethod(tempo_config.tempo, transport=chain.transport)
+    pushed_transfer(chain, LOOKUP_PARAMS, tx_hash="0x" + "b4" * 32)
+    assert method.lookup("0x" + "b4" * 32, lookup_terms(tempo_config.tempo), None) == tempo.CHAIN_PAID
+
+
+def test_the_pinned_sdk_refuses_an_expired_challenge_and_names_the_hash_we_compute(tempo_config, chain):
+    """``check`` relies on the SDK's validate for expiry; ``credential_transaction_hash`` on its private hash
+    functions. Both against the pinned version."""
+    method = tempo.TempoMethod(tempo_config.tempo, transport=chain.transport)
+    request = tempo.charge_request(tempo_config.tempo, 1900)
+    params = {"id": "ch_sdk", "realm": "testserver", "method": "tempo", "intent": "charge",
+              "request": mpp.encode_object(request), "expires": mpp.expires_at(seconds=300)}
+    signed = signed_transfer(chain, params)
+    fresh = mpp.parse_credential(credential(params, {"type": "transaction", "signature": signed}))
+    checked = method.check(fresh, request)
+    assert checked.transaction_hash == tempo.credential_transaction_hash(fresh) == tx_hash_of(signed)
+    assert checked.mode == "pull" and checked.valid_before is not None
+    stale = mpp.parse_credential(credential({**params, "expires": "2020-01-01T00:00:00Z"},
+                                            {"type": "transaction", "signature": signed}))
+    with pytest.raises(tempo.Refused) as refused:
+        method.check(stale, request)
+    # pympp 0.26.0 raises VerificationError("Request has expired"), not PaymentExpiredError.
+    assert refused.value.problem == "verification-failed" and "Request has expired" in refused.value.detail
+    assert chain.sent == []
+
+
+def test_the_deposit_address_is_checked_again_after_an_hour(tcredits, payments, monkeypatch):
+    from calotype import credits as credits_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(credits_module.time, "monotonic", lambda: clock[0])
+    assert tcredits.tempo_ready()
+    listed = payments.client.raw_request.call_count
+    clock[0] += 3599
+    assert tcredits.tempo_ready() and payments.client.raw_request.call_count == listed  # not asked again yet
+    payments.deposit_addresses = []  # the account no longer lists it
+    clock[0] += 2
+    assert not tcredits.tempo_ready() and tcredits.offered_methods() == ("stripe",)
+    payments.deposit_addresses = [DEPOSIT_ADDRESS]
+    clock[0] += 299
+    assert not tcredits.tempo_ready()  # a failure is asked again after five minutes
+    clock[0] += 2
+    assert tcredits.tempo_ready()

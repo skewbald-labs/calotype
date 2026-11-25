@@ -149,6 +149,7 @@ from .storage import (
     TryDay,
     generate_key,
     hash_key,
+    refund_amount,
     source_from_label,
 )
 
@@ -653,8 +654,11 @@ class FirestoreStorage:
         purchases = [_doc_to_purchase(d.to_dict()) for d in query.stream()]
         return sorted(purchases, key=lambda p: (p.created_at, p.id))
 
-    def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None:
-        """Mark a purchase refunded and take back what is left of it, as one step (see storage.py)."""
+    def refund_credit_purchase(
+        self, purchase_id: str, *, prorated: bool = False
+    ) -> tuple[CreditPurchase, bool] | None:
+        """Mark a purchase refunded, take back what is left of it and fix the amount to refund, as one step
+        (see storage.py)."""
         purchase_ref = self._purchase_ref(purchase_id)
         now = datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -665,7 +669,14 @@ class FirestoreStorage:
                 return None
             doc = snap.to_dict()
             if doc.get("refunded_at") is not None:
-                return _doc_to_purchase(doc), False
+                purchase = _doc_to_purchase(doc)
+                if purchase.refund_amount_cents is None:
+                    # Refunded before the amount was stored with the refund: fixed now, once.
+                    amount = refund_amount(purchase, purchase.credits_removed, prorated=prorated)
+                    fixed = {"refund_amount_cents": amount}
+                    t.update(purchase_ref, fixed)
+                    purchase = _doc_to_purchase({**doc, **fixed})
+                return purchase, False
             credit_ref = self._credit_ref(doc["key_id"])
             credit = credit_ref.get(transaction=t)
             # The stored value, which a refused consume_credit may hold below zero
@@ -676,28 +687,15 @@ class FirestoreStorage:
             removed = min(int(doc["screenshots"]), max(stored, 0)) if credited else 0
             if credit.exists and removed:
                 t.update(credit_ref, {"balance": stored - removed})
-            changes = {"refunded_at": now, "credits_removed": removed}
+            changes = {
+                "refunded_at": now,
+                "credits_removed": removed,
+                "refund_amount_cents": refund_amount(_doc_to_purchase(doc), removed, prorated=prorated),
+            }
             t.update(purchase_ref, changes)
             return _doc_to_purchase({**doc, **changes}), True
 
         return refund(self._client.transaction())
-
-    def set_credit_refund_amount(self, purchase_id: str, amount_cents: int) -> int | None:
-        """Fix the amount to refund for a refunded purchase, the first time only (see storage.py)."""
-        ref = self._purchase_ref(purchase_id)
-
-        @firestore.transactional
-        def fix(t) -> int | None:
-            snap = ref.get(transaction=t)
-            if not snap.exists or snap.get("refunded_at") is None:
-                return None
-            fixed = snap.to_dict().get("refund_amount_cents")
-            if fixed is not None:
-                return int(fixed)
-            t.update(ref, {"refund_amount_cents": int(amount_cents)})
-            return int(amount_cents)
-
-        return fix(self._client.transaction())
 
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool:
         """Record the Stripe Refund made for a refunded purchase."""
@@ -713,11 +711,16 @@ class FirestoreStorage:
 
         return record(self._client.transaction())
 
-    def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool:
-        """Link a purchase to the PaymentIntent that records it in Stripe. Never replaces another one."""
+    def set_credit_payment_intent(
+        self, purchase_id: str, payment_intent: str, *, replacing: str | None = None
+    ) -> bool:
+        """Link a purchase to the PaymentIntent that records it in Stripe. Never replaces another one, except
+        ``replacing`` while the purchase is not credited (see storage.py)."""
 
         def link(doc):
-            if doc.get("payment_intent") is not None:
+            linked = doc.get("payment_intent")
+            credited = (doc.get("status") or PURCHASE_CREDITED) == PURCHASE_CREDITED
+            if linked is not None and not (replacing is not None and linked == replacing and not credited):
                 return None  # linked already: to this one (True below) or to another (False)
             return True, {"payment_intent": payment_intent}, []
 

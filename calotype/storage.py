@@ -217,6 +217,18 @@ PURCHASE_MUTABLE_FIELDS = frozenset(
     {"status", "payment_intent", "stripe_attempt", "stripe_retry_at", "refund_id", "refund_status"}
 )
 
+
+def refund_amount(purchase: CreditPurchase, removed: int, *, prorated: bool) -> int:
+    """The cents to refund for ``purchase`` when ``removed`` of its screenshots were taken back.
+
+    All of it, unless ``prorated``: then the share of the price that was
+    unused. A purchase never credited gave nothing to use, so all of it goes back.
+    """
+    if not purchase.credited or not prorated:
+        return purchase.amount_cents
+    return purchase.amount_cents * removed // purchase.screenshots
+
+
 # The claim that binds a Tempo challenge to the one transaction that pays it (``bind_tempo_payment``).
 TEMPO_CHALLENGE_CLAIM = "calotype:tempo-challenge:"
 
@@ -389,10 +401,13 @@ class Storage(Protocol):
     def get_credit_purchase(self, purchase_id: str) -> CreditPurchase | None: ...
     def find_credit_purchase_by_challenge(self, challenge_id: str) -> CreditPurchase | None: ...
     def list_credit_purchases(self, key_id: int) -> list[CreditPurchase]: ...
-    def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None: ...
-    def set_credit_refund_amount(self, purchase_id: str, amount_cents: int) -> int | None: ...
+    def refund_credit_purchase(
+        self, purchase_id: str, *, prorated: bool = False
+    ) -> tuple[CreditPurchase, bool] | None: ...
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool: ...
-    def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool: ...
+    def set_credit_payment_intent(
+        self, purchase_id: str, payment_intent: str, *, replacing: str | None = None
+    ) -> bool: ...
     def claim_payment(self, claim: str, owner: str, value: str) -> bool: ...
     def get_payment_claim(self, claim: str) -> tuple[str, str] | None: ...
     def release_payment_claim(self, claim: str, owner: str) -> None: ...
@@ -1005,13 +1020,19 @@ class SQLiteStorage:
             ).fetchall()
         return [_row_to_purchase(r) for r in rows]
 
-    def refund_credit_purchase(self, purchase_id: str) -> tuple[CreditPurchase, bool] | None:
-        """Mark a purchase refunded and take back what is left of it, as one step.
+    def refund_credit_purchase(
+        self, purchase_id: str, *, prorated: bool = False
+    ) -> tuple[CreditPurchase, bool] | None:
+        """Mark a purchase refunded, take back what is left of it and fix the amount to refund, as one step.
 
         The credit taken back is the purchase's size or the key's whole
-        balance, whichever is smaller: credit already spent stays spent.
-        Returns (the purchase as it is now, whether this call changed it), or
-        None if there is no such purchase. A second call changes nothing.
+        balance, whichever is smaller: credit already spent stays spent. The
+        amount to refund (``refund_amount_cents``, see ``refund_amount``) is
+        fixed in the same step, so a later call, whatever ``prorated`` says
+        then, refunds the same amount. Returns (the purchase as it is now,
+        whether this call took the credit back), or None if there is no such
+        purchase. A second call changes nothing, except to fix the amount of a
+        purchase refunded before it was stored with the refund.
         """
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
@@ -1022,8 +1043,8 @@ class SQLiteStorage:
                     f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)
                 ).fetchone()
                 changed = False
-                if row is not None and row[9] is None:
-                    purchase = _row_to_purchase(row)
+                purchase = _row_to_purchase(row) if row is not None else None
+                if purchase is not None and purchase.refunded_at is None:
                     # A purchase never credited (a Tempo payment not yet matched, or unmatched) gave nothing.
                     held = self._credit_locked(purchase.key_id) if purchase.credited else 0
                     removed = min(purchase.screenshots, held)
@@ -1031,34 +1052,25 @@ class SQLiteStorage:
                         "UPDATE credits SET balance = balance - ? WHERE key_id = ?", (removed, purchase.key_id)
                     )
                     db.execute(
-                        "UPDATE credit_purchases SET refunded_at = ?, credits_removed = ? WHERE id = ?",
-                        (now, removed, purchase_id),
+                        "UPDATE credit_purchases SET refunded_at = ?, credits_removed = ?, refund_amount_cents = ? "
+                        "WHERE id = ?",
+                        (now, removed, refund_amount(purchase, removed, prorated=prorated), purchase_id),
                     )
+                    changed = True
+                elif purchase is not None and purchase.refund_amount_cents is None:
+                    db.execute(
+                        "UPDATE credit_purchases SET refund_amount_cents = ? WHERE id = ?",
+                        (refund_amount(purchase, purchase.credits_removed, prorated=prorated), purchase_id),
+                    )
+                if purchase is not None:
                     row = db.execute(
                         f"SELECT {_PURCHASE_COLUMNS} FROM credit_purchases WHERE id = ?", (purchase_id,)
                     ).fetchone()
-                    changed = True
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
         return (_row_to_purchase(row), changed) if row else None
-
-    def set_credit_refund_amount(self, purchase_id: str, amount_cents: int) -> int | None:
-        """Fix the amount to refund for a refunded purchase, the first time only. Returns the amount fixed,
-        or None if the purchase does not exist or has not been refunded."""
-        with self._lock:
-            db = self._db()
-            db.execute(
-                "UPDATE credit_purchases SET refund_amount_cents = ? WHERE id = ? AND refunded_at IS NOT NULL "
-                "AND refund_amount_cents IS NULL",
-                (int(amount_cents), purchase_id),
-            )
-            row = db.execute(
-                "SELECT refund_amount_cents FROM credit_purchases WHERE id = ? AND refunded_at IS NOT NULL",
-                (purchase_id,),
-            ).fetchone()
-        return None if row is None or row[0] is None else int(row[0])
 
     def set_credit_refund_id(self, purchase_id: str, refund_id: str) -> bool:
         """Record the Stripe Refund made for a refunded purchase."""
@@ -1069,13 +1081,20 @@ class SQLiteStorage:
             )
         return cur.rowcount == 1
 
-    def set_credit_payment_intent(self, purchase_id: str, payment_intent: str) -> bool:
-        """Link a purchase to the PaymentIntent that records it in Stripe. Never replaces another one."""
+    def set_credit_payment_intent(
+        self, purchase_id: str, payment_intent: str, *, replacing: str | None = None
+    ) -> bool:
+        """Link a purchase to the PaymentIntent that records it in Stripe. True if it is linked to it now.
+
+        Never replaces another one, except ``replacing``, and that only while
+        the purchase is not credited: the caller has found that this
+        PaymentIntent, not that one, is Stripe's settlement of the transfer.
+        """
         with self._lock:
             cur = self._db().execute(
                 "UPDATE credit_purchases SET payment_intent = ? WHERE id = ? "
-                "AND (payment_intent IS NULL OR payment_intent = ?)",
-                (payment_intent, purchase_id, payment_intent),
+                "AND (payment_intent IS NULL OR payment_intent = ? OR (payment_intent = ? AND status != ?))",
+                (payment_intent, purchase_id, payment_intent, replacing, PURCHASE_CREDITED),
             )
         return cur.rowcount == 1
 

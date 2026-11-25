@@ -35,12 +35,15 @@ What this module does, and what it leaves to the protocol's official SDK
   one transfer at most. Only then does ``broadcast`` send a pull transaction
   (the SDK's ``broadcast``). Its replay record (``ClaimStore``) is scoped to
   one attempt, so a failing attempt never releases a claim a parallel one holds.
-- ``lookup`` reconciles a bound transaction later, by its hash alone and never
-  by broadcasting again: the receipt is found and checked against the terms
-  stored with the purchase ("paid"), or the transfer reverted or can no longer
-  be included, by chain time past its ``valid_before`` ("failed"), or neither
-  is known yet ("pending"). This is what answers a buyer who retries after the
-  challenge expired.
+- ``lookup`` reconciles a transaction by its hash alone, and never sends it:
+  the receipt is found and checked against the terms stored with the purchase
+  (or, for a buyer-broadcast hash never bound, the expired challenge's own
+  signed terms) ("paid"), or the transfer reverted or can no longer be
+  included, by chain time past its ``valid_before`` ("failed"), or neither is
+  known yet ("pending"). This is what answers a buyer who retries after the
+  challenge expired. (Within the challenge's validity, ``credits.py`` may
+  ``broadcast`` the same signed bytes of a pending purchase once more: the
+  same transaction, not a new payment.)
 - The result is a transaction hash. ``credits.py`` releases the pack's credit
   only once Stripe has independently matched a settled payment to it.
 
@@ -76,6 +79,12 @@ INTENT = "charge"
 NETWORK = "tempo"  # Stripe's name for the chain, in deposit addresses and PaymentIntents
 DECIMALS = 6
 BASE_UNITS_PER_CENT = 10 ** (DECIMALS - 2)
+
+# The SDK version this module is written against. ``lookup`` and ``credential_transaction_hash`` call
+# private functions of it (``_get_transaction_receipt``, ``_confirm_not_included``, ``_validate_hash``,
+# ``_assert_rpc_chain_id``, ``_raw_transaction_hash``, ``_canonical_raw_transaction``); requirements.txt pins
+# it, and tests/test_tempo.py checks both and those functions' behaviour. Moving it means reading them again.
+PYMPP_VERSION = "0.26.0"
 
 # From pympp 0.26.0, mpp/methods/tempo/_defaults.py.
 LIVE_CHAIN_ID = 4217  # Tempo mainnet
@@ -210,6 +219,14 @@ def charge_request(config: TempoConfig, amount_cents: int) -> dict[str, Any]:
         "recipient": config.recipient,
         "methodDetails": {"chainId": config.chain_id},
     }
+
+
+def request_cents(request: Mapping[str, Any]) -> int | None:
+    """The US cents a Tempo ``request`` asks for (its ``amount`` in base units), or None if not whole cents."""
+    amount = str(request.get("amount") or "")
+    if not amount.isdigit() or int(amount) <= 0 or int(amount) % BASE_UNITS_PER_CENT:
+        return None
+    return int(amount) // BASE_UNITS_PER_CENT
 
 
 class ClaimStore:

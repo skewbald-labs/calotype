@@ -65,7 +65,18 @@ asked for the PaymentIntent's refunds first, and one that has not failed is
 adopted rather than made again (Stripe forgets idempotency keys after a day).
 Stripe's answer is kept as the refund's status. A refund still ``pending`` is
 not done: run the command again later to read its outcome, and if it failed, a
-new refund of the same amount is made.
+new refund of the same amount is made. Nothing else updates that status (no
+webhook does): ``credits KEY_ID`` shows each purchase's last known refund
+status, and rerunning ``refund-credit`` is the only way to advance it.
+
+Only a refund this command made for this purchase (``calotype_purchase`` in
+its metadata) of the fixed amount is adopted. Before anything changes,
+Stripe is asked: if the PaymentIntent already holds another live refund (one
+made in the Dashboard, a partial one, one of another amount), the command
+names it, refunds nothing and exits 1, for a person to reconcile; so it does
+if a Tempo payment's PaymentIntent is not Stripe's settlement of it. The
+amount to refund is fixed in the same storage step that takes the credit
+back, so a run that stops between the two cannot change it.
 
 A purchase paid in USDC on Tempo is named by its transaction hash (``0x...``).
 It is refunded through the PaymentIntent that records it in Stripe, and Stripe
@@ -84,6 +95,11 @@ a pending transfer is looked up on the chain by its hash, a paid one is
 recorded in Stripe, and its credit is released once Stripe has settled it. An
 unmatched one is recorded in Stripe only, so that it can be refunded. With
 ``--again``, a PaymentIntent that Stripe declined is let go and a new one made.
+A pending one needs the Tempo settings the service runs with
+(``STRIPE_TEMPO_DEPOSIT_ADDRESS``, and ``CALOTYPE_TEMPO_RPC_URL`` if it uses
+one) as well as ``STRIPE_SECRET_KEY``; without them the command says so and
+changes nothing. The others need only the key. It exits 1 while the purchase
+is still pending or paid but not credited.
 
 ``tempo-deposit-address`` lists the Stripe account's crypto deposit addresses
 on Tempo, the ``STRIPE_TEMPO_DEPOSIT_ADDRESS`` that stablecoin payment needs;
@@ -99,7 +115,7 @@ from datetime import UTC, datetime, timedelta
 
 from .billing import ALREADY_ENDED, CANCELED, CANCELS_AT_PERIOD_END, BillingProviderError, stripe_for_admin
 from .config import Settings
-from .credits import PaymentConflict, PaymentRefused, credits_for_admin
+from .credits import PaymentConflict, PaymentRefused, RefundBlocked, TempoNotConfigured, credits_for_admin
 from .notices import normalize_email
 from .storage import (
     FUNNEL_EVENTS,
@@ -112,6 +128,7 @@ from .storage import (
     current_day,
     current_month,
     open_configured_storage,
+    refund_amount,
 )
 
 # Replaced in tests with a provider over a fake Stripe client.
@@ -230,17 +247,12 @@ def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool
             file=sys.stderr,
         )
 
-    def refund_cents(p: CreditPurchase, removed: int) -> int:
-        if not p.credited:
-            return p.amount_cents  # never credited: nothing was used, all of it goes back
-        return p.amount_cents * removed // p.screenshots if prorated else p.amount_cents
-
     if not yes:
         balance = store.get_credit_balance(purchase.key_id)
         held = min(purchase.screenshots, balance) if purchase.credited else 0
         removed = purchase.credits_removed if purchase.refunded_at else held
         amount = purchase.refund_amount_cents if purchase.refund_amount_cents is not None else (
-            refund_cents(purchase, removed)
+            refund_amount(purchase, removed, prorated=prorated)
         )
         print(f"Would refund {describe_purchase(purchase)}", file=sys.stderr)
         if purchase.refunded_at:
@@ -268,15 +280,33 @@ def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool
                 file=sys.stderr,
             )
             return 1
-    before = purchase
-    purchase, changed = store.refund_credit_purchase(purchase_id)
+        # Before anything changes here: Stripe's records must let this command refund it (a Tempo payment's
+        # PaymentIntent has settled it; no refund on it that this command did not make for this purchase).
+        expected = purchase.refund_amount_cents
+        if expected is None:  # what the step below will fix, unless credit is spent meanwhile (checked again then)
+            held = min(purchase.screenshots, store.get_credit_balance(purchase.key_id)) if purchase.credited else 0
+            removed = purchase.credits_removed if purchase.refunded_at else held
+            expected = refund_amount(purchase, removed, prorated=prorated)
+        try:
+            provider.check_refund(purchase, expected)
+        except RefundBlocked as e:
+            print(f"{e.detail} Nothing was changed here.", file=sys.stderr)
+            return 1
+        except BillingProviderError as e:
+            print(f"Stripe could not be asked about payment {purchase.id} ({e}). Nothing was changed. Run the same "
+                  "command again.", file=sys.stderr)
+            return 1
+    # The credit is taken back and the amount fixed in one step: a later run refunds the same amount, whatever
+    # --prorated says then.
+    purchase, changed = store.refund_credit_purchase(purchase_id, prorated=prorated)
     if changed:
         print(f"took back {purchase.credits_removed} unused credits from key {purchase.key_id}", file=sys.stderr)
     else:
         print(f"the {purchase.credits_removed} unused credits had already been taken back", file=sys.stderr)
-    # Fixed the first time: a later run refunds the same amount whatever --prorated says then.
-    amount = store.set_credit_refund_amount(purchase.id, refund_cents(before, purchase.credits_removed))
-    purchase = store.get_credit_purchase(purchase.id) or purchase
+    amount = purchase.refund_amount_cents
+    if not changed and amount != refund_amount(purchase, purchase.credits_removed, prorated=prorated):
+        print(f"the amount was fixed at ${(amount or 0) / 100:.2f} by the first run; --prorated now changes nothing",
+              file=sys.stderr)
     if provider is None:
         print(
             f"WARNING: --no-stripe: payment {purchase.id} was NOT refunded. "
@@ -289,6 +319,9 @@ def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool
         return 0
     try:
         refund_id, status = provider.refund(purchase, amount)
+    except RefundBlocked as e:
+        print(f"{e.detail} The credit was taken back; the money was not returned by this command.", file=sys.stderr)
+        return 1
     except BillingProviderError as e:
         print(
             f"Stripe could not refund payment {purchase.id} ({e}). The credit was taken back; the money was "
@@ -310,7 +343,7 @@ def refund_credit(store: Storage, purchase_id: str, *, yes: bool, prorated: bool
         return 1
     print(
         f"Stripe accepted refund {refund_id} of ${amount / 100:.2f}; it is {status or 'not final'}, not done. "
-        "Run the same command again later to read its outcome.",
+        "Run the same command again later to read its outcome: nothing else updates it here.",
         file=sys.stderr,
     )
     return 0
@@ -341,6 +374,10 @@ def record_tempo(store: Storage, tx_hash: str, *, again: bool = False) -> int:
         return 1
     except PaymentRefused as e:
         print(f"not paid: {e.detail}", file=sys.stderr)
+        return 1
+    except TempoNotConfigured as e:
+        print(f"{purchase.id} is {purchase.status} and must be looked up on the chain. {e} Nothing was changed.",
+              file=sys.stderr)
         return 1
     now = store.get_credit_purchase(purchase.id) or purchase
     if result.pending:

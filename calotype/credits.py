@@ -44,18 +44,28 @@ purchase record, keyed by the transaction hash (``storage.PURCHASE_*``):
    refused before it is sent (pull) or recorded ``unmatched`` so it can be
    refunded (push, already on the chain); either way it adds nothing.
 3. A pending transaction is broadcast by the SDK. If that gives no answer,
-   the purchase stays ``pending`` and is reconciled later by its hash alone
+   the purchase stays ``pending`` and is reconciled later by its hash
    (``TempoMethod.lookup``), never by sending a fresh payment: when the buyer
-   sends the credential again, even after the challenge expired, when the
-   webhook arrives, or with ``admin record-tempo``. It becomes ``paid`` once
-   the receipt is checked, or ``failed`` if the transfer reverted or chain time
-   passed its ``valid_before`` with no receipt; only then is the buyer asked
-   to pay a new challenge.
+   sends the credential again (within the challenge's validity the SDK first
+   sends the same signed bytes once more, which the node treats as the same
+   transaction; after expiry it is only looked up), when the webhook arrives,
+   or with ``admin record-tempo``. It becomes ``paid`` once the receipt is
+   checked, or ``failed`` if the transfer reverted or chain time passed its
+   ``valid_before`` with no receipt; only then is the buyer asked to pay a new
+   challenge.
+
+   A ``hash`` credential (a transfer the buyer broadcast) for an expired
+   challenge that was never bound (sent first after expiry, sent before its
+   receipt was visible, or lost to a fault between the chain check and the
+   binding) is looked up by its hash against the challenge's own signed terms
+   and then bound as above (``_recover_pushed``). A signed transaction never
+   bound was never sent here; after expiry it is refused.
 4. A paid transfer is recorded in Stripe: one PaymentIntent with the
    ``crypto`` payment method in ``transaction_verification`` mode, as
    ``pympp``'s Stripe recorder does it, idempotency key
    ``calotype_tempo_<hash>`` (``_<n>`` after an attempt whose outcome Stripe
-   left unknown; Stripe is searched for an earlier PaymentIntent first).
+   left unknown, and only once a listing of the PaymentIntents made since it
+   shows that it made none).
 5. The credit is released (``credit_tempo_purchase``) only when that
    PaymentIntent has succeeded and its charge is Stripe's own record of this
    transaction: ``payment_method_details.crypto`` names this hash on Tempo,
@@ -63,10 +73,14 @@ purchase record, keyed by the transaction hash (``storage.PURCHASE_*``):
    buyer gets ``202`` with the hash, and the same credential, sent again,
    answers with the credit once it is released. The
    ``payment_intent.succeeded`` webhook does the same for an existing
-   purchase and never creates one from a PaymentIntent's metadata.
+   purchase and never creates one from a PaymentIntent's metadata. A
+   PaymentIntent whose charge settled the transfer takes the place of a
+   linked one that did not (declined, or still processing); one that cannot
+   be applied now is not acknowledged, so Stripe delivers it again.
 
-A refund goes through that PaymentIntent and Stripe returns stablecoins to the
-sending wallet (https://docs.stripe.com/payments/deposit-mode-stablecoin-payments,
+A refund goes through that PaymentIntent, only once its charge is checked to be
+this transfer's settlement, and Stripe returns stablecoins to the sending
+wallet (https://docs.stripe.com/payments/deposit-mode-stablecoin-payments,
 "Refunds"). Before stablecoins are offered, the deposit address must be one of
 this Stripe account's own, in the key's mode, taking the token asked for
 (``tempo_ready``); until it is, the 402 offers cards only.
@@ -156,14 +170,21 @@ MIN_CARD_CENTS = 50
 METADATA_PACK = "calotype_credit_pack"
 METADATA_SCREENSHOTS = "calotype_credit_screenshots"
 METADATA_TEMPO_TX = "calotype_tempo_tx"  # on a PaymentIntent that records a Tempo payment
+METADATA_REFUND_OF = "calotype_purchase"  # on a Refund made by ``refund``: the purchase it refunds
 HANDLED_EVENTS = frozenset({"payment_intent.succeeded"})
 
 # A PaymentIntent in one of these will not settle; one in another (processing, requires_action) still may.
 DECLINED_STATUSES = frozenset({"canceled", "requires_payment_method"})
-# After Stripe answered a recording with a 5xx (which its idempotency layer replays for the same key),
-# wait this long, so that a PaymentIntent it did create is searchable, before trying a new key.
-STRIPE_SEARCH_DELAY_S = 90
+# After Stripe answered a recording with a 5xx (which its idempotency layer replays for the same key), its
+# outcome is unknown: Stripe may have made the PaymentIntent, or may still be making it behind a gateway
+# timeout. Wait this long, then list what Stripe made since just before that attempt (``_record_tempo``).
+STRIPE_RECONCILE_DELAY_S = 90
+STRIPE_RECONCILE_MARGIN_S = 120  # how long before the attempt the listing starts
+STRIPE_RECONCILE_MAX_PAGES = 20  # of 100 PaymentIntents; past it the attempt stays unreconciled (logged)
 DEFAULT_TEMPO_SETTLE_WAIT_S = 20
+# The deposit address is checked against the Stripe account again after this long; after a failed check, sooner.
+TEMPO_ADDRESS_RECHECK_S = 3600
+TEMPO_ADDRESS_RETRY_S = 300
 SUPPORT = "skewbald@agentmail.to"
 
 UNAVAILABLE_MESSAGE = (
@@ -199,6 +220,29 @@ class PaymentUnconfirmed(Exception):
     def __init__(self, reason: str, method: str = METHOD):
         super().__init__(reason)
         self.method = method
+
+
+class TempoNotConfigured(BillingProviderError):
+    """A Tempo purchase must be looked up on the chain, and this process has no Tempo settings."""
+
+    def __init__(self, missing: list[str] | tuple[str, ...] = ()):
+        names = ", ".join(missing) or "STRIPE_TEMPO_DEPOSIT_ADDRESS"
+        super().__init__(
+            f"Tempo is not configured here ({names}): set the Tempo settings the service runs with "
+            "(STRIPE_TEMPO_DEPOSIT_ADDRESS, and CALOTYPE_TEMPO_RPC_URL if it uses one) and run again."
+        )
+        self.missing = tuple(missing)
+
+
+class RefundBlocked(Exception):
+    """A refund this command must not make: Stripe's records need a person to reconcile them first.
+
+    Nothing was made in Stripe. ``detail`` says what was found.
+    """
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
 
 
 class PaymentConflict(Exception):
@@ -348,6 +392,8 @@ class StripeCredits:
             client = stripe.StripeClient(config.secret_key, max_network_retries=2)
         self._client = client
         self._tempo = tempo.TempoMethod(config.tempo, transport=tempo_transport) if config.tempo else None
+        # Why there is no Tempo here, for a clear error (the admin CLI sets it; see credits_for_admin).
+        self.tempo_missing: tuple[str, ...] = ()
         self._tempo_verified = False
         self._tempo_next_check = 0.0
 
@@ -363,16 +409,16 @@ class StripeCredits:
 
     def tempo_ready(self) -> bool:
         """Whether ``STRIPE_TEMPO_DEPOSIT_ADDRESS`` is this Stripe account's own Tempo deposit address, in the
-        key's mode, for the token this server asks for. Asked of Stripe once; a failure is asked again
-        after five minutes, and until then no Tempo challenge is issued. A transfer to an address of
-        another account (or a stale one) would reach the chain and pass every chain check, and Stripe
-        would never settle it."""
+        key's mode, for the token this server asks for. A success holds for an hour
+        (``TEMPO_ADDRESS_RECHECK_S``), then Stripe is asked again; a failure is asked again after five
+        minutes, and until then no Tempo challenge is issued. A transfer to an address of another
+        account (or one the account no longer lists) would reach the chain and pass every chain check,
+        and Stripe would never settle it. It may call Stripe: call it from a worker thread."""
         if self._tempo is None:
             return False
-        if self._tempo_verified:
-            return True
-        if time.monotonic() < self._tempo_next_check:
-            return False
+        now = time.monotonic()
+        if now < self._tempo_next_check:
+            return self._tempo_verified
         config = self._tempo.config
         try:
             addresses = self.tempo_deposit_addresses()
@@ -381,8 +427,8 @@ class StripeCredits:
         else:
             error = None
         self._tempo_verified = any(tempo.deposit_address_matches(config, a) for a in addresses)
+        self._tempo_next_check = now + (TEMPO_ADDRESS_RECHECK_S if self._tempo_verified else TEMPO_ADDRESS_RETRY_S)
         if not self._tempo_verified:
-            self._tempo_next_check = time.monotonic() + 300
             log_event(
                 log,
                 "tempo deposit address not verified; stablecoins are not offered",
@@ -501,6 +547,11 @@ class StripeCredits:
         # 3. Still valid, and still what this pack costs in this method.
         expires = mpp.parse_time(credential.expires)
         if expires is None or expires <= datetime.now(UTC):
+            if expires is not None and self._tempo is not None and credential.method == tempo.METHOD and (
+                credential.payload.get("type") == "hash"
+            ):
+                # A transfer the buyer broadcast may have moved before the challenge expired, unbound here.
+                return self._recover_pushed(key, pack, credential, request, store)
             raise PaymentRefused("payment-expired", "The challenge has expired. Pay the new one.")
         if request != self.request_for(credential.method, pack):
             raise PaymentRefused("invalid-challenge", "The pack's terms have changed. Pay the new challenge.")
@@ -555,7 +606,65 @@ class StripeCredits:
         except tempo.Unconfirmed as e:
             # Nothing is bound and nothing was sent: the same credential can be checked again.
             raise PaymentUnconfirmed(str(e), method=tempo.METHOD) from None
+        return self._bind_tempo(key, pack, credential, request, store, checked, pack.price_usd_cents)
 
+    def _recover_pushed(
+        self, key: "ApiKey", pack: "CreditPack", credential: mpp.Credential, request: dict[str, Any], store: "Storage"
+    ) -> Settlement:
+        """A transfer the buyer broadcast (a ``hash`` credential) for an expired challenge never bound here.
+
+        The hash may have come before its receipt was visible, the server may
+        have failed between the chain check and the binding, or this may be
+        its first submission. It is looked up on the chain by its hash alone
+        (``TempoMethod.lookup``), never sent, against the challenge's own
+        terms: issued and signed by this server (checked above), so the
+        amount, token, recipient and chain are what this server asked for
+        then, even if the pack's price has changed since. Then it is bound
+        exactly as before expiry, or recorded ``unmatched`` if another
+        transfer took the challenge. A transfer not on the chain yet is
+        ``PaymentUnconfirmed`` (send it again); one that does not pay these
+        terms, or reverted, is refused.
+        """
+        assert self._tempo is not None
+        config = self._tempo.config
+        tx_hash = tempo.credential_transaction_hash(credential)
+        amount_cents = tempo.request_cents(request)
+        if (
+            tx_hash is None
+            or amount_cents is None
+            or str(request.get("currency") or "").lower() != config.currency.lower()
+            or (request.get("methodDetails") or {}).get("chainId") != config.chain_id
+        ):
+            raise PaymentRefused("payment-expired", "The challenge has expired. Pay the new one.")
+        terms = {"request": request, "realm": credential.realm, "challenge_id": credential.id}
+        try:
+            found = self._tempo.lookup(tx_hash, terms, None)
+        except tempo.Unconfirmed as e:
+            raise PaymentUnconfirmed(str(e), method=tempo.METHOD) from None
+        log_event(log, "tempo transfer looked up after expiry", key_id=key.id, transaction=tx_hash, found=found)
+        if found == tempo.CHAIN_PENDING:
+            raise PaymentUnconfirmed("not on the chain yet", method=tempo.METHOD)
+        if found == tempo.CHAIN_FAILED:
+            raise PaymentRefused(
+                "verification-failed",
+                f"Transaction {tx_hash} does not pay this challenge, or it reverted. Nothing was credited. "
+                "Pay the new challenge.",
+            )
+        return self._bind_tempo(
+            key, pack, credential, request, store, tempo.Checked(tx_hash, "push", None), amount_cents
+        )
+
+    def _bind_tempo(
+        self,
+        key: "ApiKey",
+        pack: "CreditPack",
+        credential: mpp.Credential,
+        request: dict[str, Any],
+        store: "Storage",
+        checked: tempo.Checked,
+        amount_cents: int,
+    ) -> Settlement:
+        """Bind the challenge to the checked transfer (one atomic step), then move the purchase on."""
         tx_hash = checked.transaction_hash
         terms = json.dumps(
             {"request": request, "realm": credential.realm, "challenge_id": credential.id}, sort_keys=True
@@ -565,7 +674,7 @@ class StripeCredits:
             key.id,
             pack=pack.name,
             screenshots=pack.screenshots,
-            amount_cents=pack.price_usd_cents,
+            amount_cents=amount_cents,
             currency=CURRENCY,
             challenge_id=credential.id,
             # A pushed transfer was found on the chain by the check; a signed one is not sent yet.
@@ -583,7 +692,7 @@ class StripeCredits:
                 # A second transfer for this challenge, already on the chain. It adds nothing, and is kept
                 # (uncredited, without the challenge) so that it can be recorded in Stripe and refunded.
                 store.add_credit_purchase(
-                    tx_hash, key.id, pack=pack.name, screenshots=pack.screenshots, amount_cents=pack.price_usd_cents,
+                    tx_hash, key.id, pack=pack.name, screenshots=pack.screenshots, amount_cents=amount_cents,
                     currency=CURRENCY, challenge_id="", method=tempo.METHOD, status=PURCHASE_UNMATCHED,
                     tempo_terms=terms,
                 )
@@ -680,13 +789,16 @@ class StripeCredits:
     ) -> Settlement:
         """Move a bound Tempo purchase as far as it can go now, and say where it is.
 
-        A pending one is looked up on the chain by its hash (never broadcast
-        again: a credential resent within the challenge's time is sent once
-        more by the SDK, which the node treats as the same transaction). A
-        paid one is recorded in Stripe and credited once Stripe has settled
-        it. ``sent`` says this call has just broadcast it.
+        A pending one is reconciled by its hash on the chain. If its signed
+        credential is resent while the challenge is still valid, the SDK sends
+        those same signed bytes once more first (``_resend_tempo``): the node
+        treats them as the same transaction, so at most one transfer moves.
+        After expiry it is only looked up. It is never paid with a fresh
+        transaction. A paid one is recorded in Stripe and credited once Stripe
+        has settled it; that needs no chain. ``sent`` says this call has just
+        broadcast it. Raises ``TempoNotConfigured`` for a pending purchase in
+        a process without Tempo settings.
         """
-        assert self._tempo is not None or purchase.status == PURCHASE_CREDITED
         if purchase.status == PURCHASE_PENDING and not sent and credential is not None:
             purchase = self._resend_tempo(purchase, credential, store)
         if purchase.status == PURCHASE_PENDING:
@@ -734,7 +846,8 @@ class StripeCredits:
         return self._broadcast_tempo(purchase, credential, request, store)
 
     def _look_up_tempo(self, purchase: "CreditPurchase", store: "Storage") -> "CreditPurchase":
-        assert self._tempo is not None
+        if self._tempo is None:
+            raise TempoNotConfigured(self.tempo_missing)
         try:
             found = self._tempo.lookup(purchase.id, json.loads(purchase.tempo_terms or "{}"), purchase.valid_before)
         except (tempo.Unconfirmed, ValueError, KeyError):
@@ -823,19 +936,21 @@ class StripeCredits:
         if purchase.payment_intent:
             return self._retrieve_intent(purchase.payment_intent)
         if purchase.stripe_retry_at:
-            # The last attempt's outcome is unknown. Look for what it made before making anything new.
-            if datetime.now(UTC) < datetime.fromisoformat(purchase.stripe_retry_at):
+            # The last attempt's outcome is unknown, and it is stored (``stripe_attempt``, ``stripe_retry_at``).
+            # It is reconciled before anything new is made: the PaymentIntents Stripe made since just before it
+            # are listed (a list reads what Stripe has written; its search can lag by minutes, longer in an
+            # outage). One that settled this transfer is linked; else one still live; only if there is none is
+            # a new idempotency key used.
+            retry_at = datetime.fromisoformat(purchase.stripe_retry_at)
+            if datetime.now(UTC) < retry_at:
                 return None
-            try:
-                found = _plain(self._client.v1.payment_intents.search(
-                    params={"query": f"metadata['{METADATA_TEMPO_TX}']:'{purchase.id}'", "limit": 10}
-                ))
-            except stripe.StripeError as e:
-                log_event(log, "stripe search failed", level=logging.WARNING, error=type(e).__name__)
+            since = retry_at - timedelta(seconds=STRIPE_RECONCILE_DELAY_S + STRIPE_RECONCILE_MARGIN_S)
+            found = self._list_tempo_intents(purchase.id, since)
+            if found is None:
                 return None
-            live = [i for i in found.get("data") or [] if i.get("status") not in DECLINED_STATUSES]
-            if live:
-                return self._link_intent(purchase, str(live[0]["id"]), store)
+            chosen = _best_candidate(found, purchase)
+            if chosen is not None:
+                return self._link_intent(purchase, str(chosen["id"]), store)
             purchase = store.update_credit_purchase(purchase.id, {"stripe_retry_at": None}) or purchase
 
         params: dict[str, Any] = {
@@ -874,9 +989,11 @@ class StripeCredits:
                       transaction=purchase.id, error=type(e).__name__, code=getattr(e, "code", None),
                       http_status=status)
             if isinstance(e, stripe.IdempotencyError) or (isinstance(status, int) and status >= 500):
-                # Stripe's idempotency layer replays this answer for the same key. Search first, later, then
-                # try a new key.
-                retry_at = (datetime.now(UTC) + timedelta(seconds=STRIPE_SEARCH_DELAY_S)).isoformat(timespec="seconds")
+                # Stripe's idempotency layer replays this answer for the same key. Reconcile it later, then
+                # (only if Stripe made nothing) try a new key.
+                retry_at = (datetime.now(UTC) + timedelta(seconds=STRIPE_RECONCILE_DELAY_S)).isoformat(
+                    timespec="seconds"
+                )
                 store.update_credit_purchase(
                     purchase.id, {"stripe_attempt": purchase.stripe_attempt + 1, "stripe_retry_at": retry_at}
                 )
@@ -886,6 +1003,30 @@ class StripeCredits:
             log_event(log, "tempo payment not recorded in stripe", level=logging.ERROR, transaction=purchase.id)
             return None
         return self._link_intent(purchase, intent_id, store)
+
+    def _list_tempo_intents(self, tx_hash: str, since: datetime) -> list[dict[str, Any]] | None:
+        """The PaymentIntents made since ``since`` that record ``tx_hash``, with their charges. None: not known now."""
+        import stripe
+
+        params: dict[str, Any] = {
+            "created": {"gte": int(since.timestamp())}, "limit": 100, "expand": ["data.latest_charge"],
+        }
+        found: list[dict[str, Any]] = []
+        for _ in range(STRIPE_RECONCILE_MAX_PAGES):
+            try:
+                page = _plain(self._client.v1.payment_intents.list(params=params))
+            except stripe.StripeError as e:
+                log_event(log, "stripe list failed", level=logging.WARNING, error=type(e).__name__,
+                          http_status=getattr(e, "http_status", None))
+                return None
+            data = [i for i in page.get("data") or [] if isinstance(i, Mapping)]
+            found += [i for i in data if str((i.get("metadata") or {}).get(METADATA_TEMPO_TX) or "").lower() == tx_hash]
+            if not page.get("has_more") or not data:
+                return found
+            params = {**params, "starting_after": str(data[-1]["id"])}
+        log_event(log, "too many payment intents to reconcile a tempo recording", level=logging.ERROR,
+                  transaction=tx_hash)
+        return None
 
     def _link_intent(self, purchase: "CreditPurchase", intent_id: str, store: "Storage") -> dict[str, Any] | None:
         if not store.set_credit_payment_intent(purchase.id, intent_id):
@@ -1045,7 +1186,9 @@ class StripeCredits:
         metadata) are acted on; any other payment is ``ignored``. The
         PaymentIntent is read from Stripe again, so the event's own content is
         never trusted for the amount. Raises ``BillingProviderError`` if Stripe
-        cannot be reached; the caller answers 500 and Stripe retries.
+        cannot be reached, or a Tempo purchase this settles cannot be moved on
+        now (the chain or Stripe gave no answer); the event is then not marked
+        processed, the caller answers 500 and Stripe delivers it again.
         """
         event_id, event_type = event["id"], event["type"]
         obj = _event_object(event)
@@ -1130,21 +1273,43 @@ class StripeCredits:
             log_event(log, "stripe settlement does not match the tempo purchase", level=logging.ERROR,
                       transaction=tx_hash, payment_intent=intent_id, problem=problem)
             return EventResult("ignored", purchase.key_id)
-        if not store.set_credit_payment_intent(tx_hash, intent_id):
-            log_event(log, "tempo purchase is linked to another payment intent", level=logging.ERROR,
-                      transaction=tx_hash, payment_intent=intent_id)
-            return EventResult("ignored", purchase.key_id)
+        # This PaymentIntent has settled this transfer, by Stripe's own record of it. It becomes the purchase's
+        # link, unless the purchase is linked to another one that has settled it too. One the purchase is linked
+        # to that has not (a replacement made after an attempt Stripe left unknown, then declined or still
+        # processing) gives way: otherwise this settlement would be ignored and the credit stranded.
+        linked, replacing = purchase.payment_intent, None
+        if linked and linked != intent_id:
+            current = self._retrieve_intent(linked)
+            if current is None:
+                raise BillingProviderError("Stripe could not be asked about the linked PaymentIntent")
+            if _settlement_mismatch(current, purchase) is None:
+                log_event(log, "a second stripe settlement of a tempo transaction; refund it", level=logging.ERROR,
+                          transaction=tx_hash, payment_intent=intent_id, linked=linked)
+                return EventResult("ignored", purchase.key_id)
+            replacing = linked
+        if not store.set_credit_payment_intent(tx_hash, intent_id, replacing=replacing):
+            # Linked meanwhile (a parallel call). Decided again when Stripe delivers the event again.
+            raise BillingProviderError("the purchase's PaymentIntent changed meanwhile")
+        if replacing:
+            log_event(log, "tempo purchase linked to the payment intent that settled it", level=logging.WARNING,
+                      transaction=tx_hash, payment_intent=intent_id, replaced=replacing)
         purchase = store.get_credit_purchase(tx_hash) or purchase
         if purchase.status in (PURCHASE_UNMATCHED, PURCHASE_FAILED) or self._tempo is None:
             return EventResult("ignored", purchase.key_id)
         if purchase.credited:
             return EventResult("already_credited", purchase.key_id)
+        if purchase.refunded_at:
+            return EventResult("ignored", purchase.key_id)  # refunded before Stripe settled it: never credited
         try:
             result = self._advance_tempo(purchase, store, wait=False)
         except (PaymentRefused, PaymentConflict):
             return EventResult("ignored", purchase.key_id)
         if result.pending:
-            return EventResult("pending", purchase.key_id)
+            # Work remains that could not be done now: the chain or Stripe could not be asked. Not acknowledged,
+            # and not marked processed: the caller answers 5xx and Stripe delivers the event again.
+            log_event(log, "tempo settlement not applied yet; stripe will deliver it again", level=logging.WARNING,
+                      transaction=tx_hash, payment_intent=intent_id, status=purchase.status)
+            raise BillingProviderError("the Tempo purchase could not be advanced now")
         return EventResult("credited" if result.added else "already_credited", purchase.key_id)
 
     # --- refunds (admin CLI) ---------------------------------------------------------------
@@ -1152,37 +1317,34 @@ class StripeCredits:
     def refund(self, purchase: "CreditPurchase", amount_cents: int) -> tuple[str, str]:
         """Refund ``amount_cents`` of a purchase through Stripe. Returns (Refund id, its status).
 
-        Stripe is asked first for the refunds the PaymentIntent already has:
-        one that has not failed or been canceled is this purchase's refund
-        (its id may never have been saved, and Stripe forgets idempotency keys
-        after a day), and no other is made. Only when every earlier refund
-        failed is a new one made, under a new idempotency key. Raises
-        ``BillingProviderError`` if Stripe refuses or cannot be reached (and
-        then nothing was made), and ``ValueError`` for a Tempo payment that
-        Stripe has no PaymentIntent for. A Tempo payment's refund goes back in
-        stablecoins to the wallet that sent it (Stripe's rule for crypto).
+        Stripe is asked first for the refunds its PaymentIntent already has
+        (``check_refund``). This purchase's own refund (made by this method:
+        ``calotype_purchase`` in its metadata) of this amount, not failed or
+        canceled, is adopted and no other is made: its id may never have been
+        saved, and Stripe forgets idempotency keys after a day. A new one is
+        made, under a new idempotency key, only when every earlier one of ours
+        failed. Raises ``RefundBlocked`` (nothing made) when the PaymentIntent
+        is not Stripe's settlement of this purchase, or holds a refund not
+        made for this purchase (a Dashboard refund, say) or of another amount:
+        a person reconciles those. Raises ``BillingProviderError`` if Stripe
+        refuses or cannot be reached (and then nothing was made), and
+        ``ValueError`` for a Tempo payment that Stripe has no PaymentIntent
+        for. A Tempo payment's refund goes back in stablecoins to the wallet
+        that sent it (Stripe's rule for crypto).
         """
         import stripe
 
-        intent_id = purchase.stripe_payment_intent
-        if intent_id is None or not _PAYMENT_INTENT.match(intent_id):
-            raise ValueError("no Stripe PaymentIntent records this payment")
         if not 0 < amount_cents <= purchase.amount_cents:
             raise ValueError("the refund must be more than nothing and at most what was paid")
+        intent_id, ours = self.check_refund(purchase, amount_cents)
         try:
-            listed = _plain(self._client.v1.refunds.list(params={"payment_intent": intent_id, "limit": 100}))
-            earlier = [r for r in listed.get("data") or [] if isinstance(r, Mapping)]
-            live = [r for r in earlier if r.get("status") not in ("failed", "canceled")]
+            live = [r for r in ours if r.get("status") not in ("failed", "canceled")]
             if live:
                 found = max(live, key=lambda r: int(r.get("created") or 0))
-                if found.get("amount") != amount_cents:
-                    log_event(log, "refund found with another amount", level=logging.WARNING,
-                              payment_intent=intent_id, refund=found.get("id"), amount=found.get("amount"),
-                              expected=amount_cents)
                 log_event(log, "credit refund found in stripe", payment_intent=intent_id, refund=found.get("id"),
                           status=found.get("status"))
                 return str(found["id"]), str(found.get("status") or "")
-            suffix = f"_{len(earlier)}" if earlier else ""
+            suffix = f"_{len(ours)}" if ours else ""
             refund = self._client.v1.refunds.create(
                 params={
                     "payment_intent": intent_id,
@@ -1191,20 +1353,13 @@ class StripeCredits:
                     "metadata": {
                         METADATA_KEY_ID: str(purchase.key_id),
                         METADATA_PACK: purchase.pack,
-                        "calotype_purchase": purchase.id,
+                        METADATA_REFUND_OF: purchase.id,
                     },
                 },
                 options={"idempotency_key": f"calotype_credit_refund_{purchase.id}{suffix}"},
             )
         except stripe.StripeError as e:
-            log_event(
-                log,
-                "stripe refund failed",
-                level=logging.ERROR,
-                error=type(e).__name__,
-                code=getattr(e, "code", None),
-                http_status=getattr(e, "http_status", None),
-            )
+            self._log_refund_failure(e)
             raise BillingProviderError(f"{type(e).__name__} {getattr(e, 'code', None) or ''}".strip()) from None
         refund_id, status = _field(refund, "id"), _field(refund, "status")
         if not isinstance(refund_id, str) or not refund_id:
@@ -1212,6 +1367,74 @@ class StripeCredits:
         log_event(log, "credit purchase refunded", payment_intent=intent_id, refund=refund_id, amount=amount_cents,
                   status=status)
         return refund_id, str(status or "")
+
+    def check_refund(
+        self, purchase: "CreditPurchase", amount_cents: int | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Whether Stripe's records let ``refund`` refund this purchase. Makes nothing.
+
+        Returns (the PaymentIntent to refund, this purchase's own earlier
+        refunds on it). Raises ``RefundBlocked`` if a Tempo purchase's
+        PaymentIntent is not Stripe's settlement of its transfer (not
+        succeeded, or its charge names another transaction or amount), if the
+        PaymentIntent holds a live refund not made for this purchase, or (with
+        ``amount_cents``) one of ours of another amount. Raises
+        ``BillingProviderError`` if Stripe cannot be asked and ``ValueError``
+        if Stripe has no PaymentIntent for the purchase.
+        """
+        import stripe
+
+        intent_id = purchase.stripe_payment_intent
+        if intent_id is None or not _PAYMENT_INTENT.match(intent_id):
+            raise ValueError("no Stripe PaymentIntent records this payment")
+        try:
+            if purchase.method == tempo.METHOD:
+                intent = _plain(
+                    self._client.v1.payment_intents.retrieve(intent_id, params={"expand": ["latest_charge"]})
+                )
+                problem = _settlement_mismatch(intent, purchase)
+                if problem:
+                    raise RefundBlocked(
+                        f"PaymentIntent {intent_id} is not Stripe's settlement of transaction {purchase.id} "
+                        f"({problem}; status {intent.get('status')}). Run 'record-tempo {purchase.id}' and refund "
+                        "once it has settled."
+                    )
+            listed = _plain(self._client.v1.refunds.list(params={"payment_intent": intent_id, "limit": 100}))
+        except stripe.StripeError as e:
+            self._log_refund_failure(e)
+            raise BillingProviderError(f"{type(e).__name__} {getattr(e, 'code', None) or ''}".strip()) from None
+        earlier = [r for r in listed.get("data") or [] if isinstance(r, Mapping)]
+        ours = [r for r in earlier if (r.get("metadata") or {}).get(METADATA_REFUND_OF) == purchase.id]
+        others = [
+            r for r in earlier
+            if r.get("status") not in ("failed", "canceled") and (
+                r not in ours or (amount_cents is not None and r.get("amount") != amount_cents)
+            )
+        ]
+        if others:
+            found = "; ".join(
+                f"{r.get('id')} ${int(r.get('amount') or 0) / 100:.2f} {r.get('status')}"
+                + ("" if r in ours else " (not made by refund-credit)")
+                for r in others
+            )
+            log_event(log, "refund needs reconciling", level=logging.WARNING, payment_intent=intent_id,
+                      refunds=[r.get("id") for r in others])
+            raise RefundBlocked(
+                f"PaymentIntent {intent_id} already has refunds this refund does not match: {found}. No refund was "
+                "made. Reconcile them in the Stripe Dashboard and refund what is still owed by hand."
+            )
+        return intent_id, ours
+
+    @staticmethod
+    def _log_refund_failure(e: Exception) -> None:
+        log_event(
+            log,
+            "stripe refund failed",
+            level=logging.ERROR,
+            error=type(e).__name__,
+            code=getattr(e, "code", None),
+            http_status=getattr(e, "http_status", None),
+        )
 
 
 def credits_from_env(environ: Mapping[str, str] | None = None) -> CreditsProvider:
@@ -1222,16 +1445,31 @@ def credits_from_env(environ: Mapping[str, str] | None = None) -> CreditsProvide
     return StripeCredits(config)
 
 
-def credits_for_admin(environ: Mapping[str, str] | None = None, *, client: Any = None) -> StripeCredits | None:
-    """A provider for the admin CLI's refunds, or None if ``STRIPE_SECRET_KEY`` is not set.
+def credits_for_admin(
+    environ: Mapping[str, str] | None = None, *, client: Any = None, tempo_transport: Any = None
+) -> StripeCredits | None:
+    """A provider for the admin CLI, or None if ``STRIPE_SECRET_KEY`` is not set.
 
-    A refund needs only the secret key, so the other settings may be missing.
+    A refund, a deposit address and a Tempo purchase already on the chain
+    (``paid``, ``unmatched``) need only the secret key. Looking a ``pending``
+    Tempo purchase up on the chain needs the Tempo settings the service runs
+    with (``STRIPE_TEMPO_DEPOSIT_ADDRESS``, ``CALOTYPE_TEMPO_RPC_URL``): read
+    here, the chain following the key's mode as in the service. Without them
+    that lookup raises ``TempoNotConfigured``, naming what is missing.
     """
     env = os.environ if environ is None else environ
     secret = env.get("STRIPE_SECRET_KEY", "").strip()
     if not secret:
         return None
-    return StripeCredits(CreditsConfig(secret_key=secret), client=client)
+    tempo_config, missing = tempo.TempoConfig.from_env(env, secret)
+    config = CreditsConfig(
+        secret_key=secret,
+        api_version=env.get("STRIPE_MPP_API_VERSION", "").strip() or DEFAULT_API_VERSION,
+        tempo=tempo_config,
+    )
+    provider = StripeCredits(config, client=client, tempo_transport=tempo_transport)
+    provider.tempo_missing = tuple(missing)
+    return provider
 
 
 def describe(pack: "CreditPack") -> str:
@@ -1250,6 +1488,18 @@ def _charge_crypto(intent: Mapping[str, Any]) -> Mapping[str, Any]:
         return {}
     crypto = details.get("crypto")
     return crypto if isinstance(crypto, Mapping) else {}
+
+
+def _best_candidate(intents: list[dict[str, Any]], purchase: "CreditPurchase") -> dict[str, Any] | None:
+    """Of the PaymentIntents that record a Tempo purchase, the one to link: one that settled it (by its
+    charge), else one that still may; None if every one was declined."""
+    for intent in intents:
+        if _settlement_mismatch(intent, purchase) is None:
+            return intent
+    for intent in intents:
+        if intent.get("status") not in DECLINED_STATUSES:
+            return intent
+    return None
 
 
 def _settlement_mismatch(intent: Mapping[str, Any], purchase: "CreditPurchase") -> str | None:

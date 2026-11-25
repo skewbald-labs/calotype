@@ -818,7 +818,7 @@ def create_app(
             "price_usd": pack.price_usd_cents / 100,
         }
 
-    def payment_challenge(
+    async def payment_challenge(
         key: ApiKey, pack: CreditPack, realm: str, header: str, problem: str, detail: str
     ) -> JSONResponse:
         """402 with new challenges: the first answer, and the answer to a credential that was refused.
@@ -826,7 +826,8 @@ def create_app(
         One ``WWW-Authenticate`` header per payment method offered (card first), as the
         protocol allows (https://paymentauth.org/draft-httpauth-payment-01, appendix B.4).
         """
-        challenges = credits.challenges(key, pack, realm=realm, header=header)
+        # In a worker thread: which methods are offered may be asked of Stripe (credits.tempo_ready, hourly).
+        challenges = await asyncio.to_thread(credits.challenges, key, pack, realm=realm, header=header)
         code = problem.replace("-", "_")
         if problem == "payment-required":
             ways = " or ".join(f"'{c.method}' ({METHOD_NAMES.get(c.method, c.method)})" for c in challenges)
@@ -887,7 +888,7 @@ def create_app(
         header = mpp.PAYMENT_AUTHORIZATION if request.state.key_in_header else ""
         credential = request.headers.get(header.lower() if header else "authorization", "")
         if mpp.payment_credential(credential) is None:
-            return payment_challenge(key, pack, realm, header, "payment-required", "Payment is required for this pack.")
+            return await payment_challenge(key, pack, realm, header, "payment-required", "Payment is required for this pack.")
         # Asking for a challenge is free and unlimited. Sending credentials is not: each one that
         # passes the checks makes Calotype call Stripe or the Tempo network, so one key gets only so many an hour.
         ok, retry = app.state.credit_limiter.check(str(key.id))
@@ -904,7 +905,7 @@ def create_app(
                 credits.settle, key, pack, credential, app.state.storage, realm=realm, header=header
             )
         except PaymentRefused as e:
-            return payment_challenge(key, pack, realm, header, e.problem, e.detail)
+            return await payment_challenge(key, pack, realm, header, e.problem, e.detail)
         except PaymentConflict as e:
             # A second transfer for a challenge that another one already pays. Not "pay again".
             raise ApiError(409, "payment_conflict", e.detail, payment={"method": "tempo", "reference": e.reference})

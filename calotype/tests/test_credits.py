@@ -89,6 +89,7 @@ class FakePayments:
         self.client.v1.payment_intents.create.side_effect = self._create
         self.client.v1.payment_intents.retrieve.side_effect = self._retrieve
         self.client.v1.payment_intents.search.side_effect = self._search
+        self.client.v1.payment_intents.list.side_effect = self._list
         self.client.v1.refunds.create.side_effect = self._create_refund
         self.client.v1.refunds.list.side_effect = self._list_refunds
         self.client.raw_request.side_effect = lambda method, path, **params: (method, path, params)
@@ -115,6 +116,7 @@ class FakePayments:
                 "currency": params["currency"],
                 "metadata": dict(params["metadata"]),
                 "payment_method_types": list(params.get("payment_method_types") or ["card"]),
+                "created": int(time.time()),
             }
             if crypto:
                 verification = params["payment_method_options"]["crypto"]["transaction_verification_options"]
@@ -132,6 +134,17 @@ class FakePayments:
         found = [copy.deepcopy(i) for i in self.intents.values()
                  if match and i["metadata"].get("calotype_tempo_tx") == match.group(1)]
         return {"object": "search_result", "data": found}
+
+    def _list(self, params):
+        """``GET /v1/payment_intents``: newest first, ``created[gte]``, pages of ``limit``, as Stripe lists them."""
+        since = (params.get("created") or {}).get("gte", 0)
+        found = sorted((i for i in self.intents.values() if i.get("created", 0) >= since),
+                       key=lambda i: (i.get("created", 0), i["id"]), reverse=True)
+        if params.get("starting_after"):
+            ids = [i["id"] for i in found]
+            found = found[ids.index(params["starting_after"]) + 1:]
+        limit = params.get("limit", 10)
+        return {"object": "list", "data": [copy.deepcopy(i) for i in found[:limit]], "has_more": len(found) > limit}
 
     def settle_crypto(self, intent_id: str, status: str = "succeeded"):
         """Stripe settles (or declines) a recorded Tempo payment."""
@@ -151,6 +164,7 @@ class FakePayments:
                 "amount": params["amount"],
                 "payment_intent": params["payment_intent"],
                 "created": len(self.refund_objects) + 1,
+                "metadata": dict(params.get("metadata") or {}),
             }
             self.refund_objects[refund["id"]] = refund
             self.refund_keys[idem] = refund["id"]
@@ -1539,6 +1553,76 @@ def test_the_refund_amount_is_fixed_the_first_time(admin_store, admin_payments, 
     assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 0  # no --prorated this time: same amount
     assert admin_payments.refunds[-1].kwargs["params"]["amount"] == 1425
     assert admin_store.get_credit_purchase("pi_bought").refund_amount_cents == 1425
+    assert admin_store.get_credit_balance(key.id) == 0
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        {"amount": 500, "metadata": {}},  # a $5 refund made in the Dashboard
+        {"amount": 500, "metadata": {"calotype_purchase": "pi_bought"}},  # one of ours, of another amount
+    ],
+    ids=["dashboard", "partial"],
+)
+def test_a_refund_that_does_not_match_this_refund_is_surfaced_not_adopted(admin_store, admin_payments, capsys,
+                                                                          earlier):
+    """FR-26 re-check #5: a $5 refund already on a $19 purchase is not taken for the $19 refund. The command says
+    what it found, refunds nothing, changes nothing, and does not later call the purchase refunded."""
+    key = bought(admin_store)
+    admin_payments.refund_objects["re_earlier"] = {
+        "id": "re_earlier", "object": "refund", "status": "succeeded", "payment_intent": "pi_bought", "created": 1,
+        **earlier,
+    }
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 1
+    err = capsys.readouterr().err
+    assert "re_earlier $5.00 succeeded" in err and "Nothing was changed" in err
+    assert ("not made by refund-credit" in err) == (earlier["metadata"] == {})
+    assert admin_payments.refunds == []
+    purchase = admin_store.get_credit_purchase("pi_bought")
+    assert (purchase.refunded_at, purchase.refund_id, purchase.refund_status) == (None, None, None)
+    assert admin_store.get_credit_balance(key.id) == 5000
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 1  # and still not "already refunded"
+
+
+def test_a_refund_found_in_stripe_after_the_credit_was_taken_back_is_surfaced(admin_store, admin_payments,
+                                                                              monkeypatch, capsys):
+    """The unrelated refund appears between the check and the refund: nothing is made, and the command says so."""
+    bought(admin_store)
+    store_class = type(admin_store)
+    real = store_class.refund_credit_purchase
+
+    def and_meanwhile(*args, **kwargs):
+        admin_payments.refund_objects["re_dash"] = {
+            "id": "re_dash", "object": "refund", "status": "pending", "payment_intent": "pi_bought", "created": 1,
+            "amount": 1900, "metadata": {},
+        }
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store_class, "refund_credit_purchase", and_meanwhile)
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 1
+    err = capsys.readouterr().err
+    assert "re_dash $19.00 pending (not made by refund-credit)" in err and "credit was taken back" in err
+    assert admin_payments.refunds == [] and admin_store.get_credit_purchase("pi_bought").refund_id is None
+
+
+def test_a_run_that_stops_after_the_credit_is_taken_back_keeps_the_first_amount(admin_store, admin_payments,
+                                                                                  monkeypatch):
+    """FR-26 re-check #5: the amount is fixed with the credit's removal, in one step. A run stopped right after it
+    and rerun without --prorated refunds the prorated amount the first run decided."""
+    key = bought(admin_store, used=1250)
+    store_class = type(admin_store)
+    real = store_class.refund_credit_purchase
+
+    def then_stop(*args, **kwargs):
+        real(*args, **kwargs)
+        raise RuntimeError("stopped")
+
+    monkeypatch.setattr(store_class, "refund_credit_purchase", then_stop)
+    with pytest.raises(RuntimeError):
+        admin.main(["refund-credit", "pi_bought", "--prorated", "--yes"])
+    monkeypatch.setattr(store_class, "refund_credit_purchase", real)
+    assert admin.main(["refund-credit", "pi_bought", "--yes"]) == 0
+    assert [c.kwargs["params"]["amount"] for c in admin_payments.refunds] == [1425]
     assert admin_store.get_credit_balance(key.id) == 0
 
 
