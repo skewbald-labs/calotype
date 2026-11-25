@@ -97,3 +97,21 @@ What it showed:
 - A refund through the PaymentIntent (`StripeCredits.refund`, what `refund-credit` calls) went from `pending` to `succeeded`, with `destination_details.type: crypto` and no on-chain reference: in the sandbox no testnet coins came back to the wallet.
 
 Not run here: the `payment_intent.succeeded` webhook for a Tempo payment (the sandbox webhook points at `calotype-sandbox`, which was not deployed), a push-mode (hash) credential against the real chain, and anything in live mode.
+
+## Tempo after the FR-26 fixes: run on 2026-11-24
+
+Same setup as above (127.0.0.1, SQLite, the sandbox key, `pympp` 0.26.0 as the buyer on Moderato, pathUSD), with the new `tempo_e2e.py`, which runs with `CALOTYPE_TEMPO_SETTLE_WAIT_S=0` and billing on so that `/v1/billing/webhook` exists here. The sandbox webhook endpoint points at `calotype-sandbox`, which was not deployed, so Stripe's real `payment_intent.succeeded` event was fetched from the Events API and posted to the local endpoint, signed with a secret made for the run: Stripe's delivery itself was not exercised, the handler was, with Stripe's own payload.
+
+| What | Id |
+|---|---|
+| Run 1 | transaction `0x0928ef098d1a5ac1eabe88c5351611ca5c0038264c3951a68fd925feba8a2f5e`, PaymentIntent `pi_3UfVdYCOtiY7WH740DcC3xDx`, charge `py_3UfVdYCOtiY7WH740oO1fSLv`, event `evt_3UfVdYCOtiY7WH740oJIeXvk` (not refunded; testnet coins) |
+| Run 2 | transaction `0xb2494c8a71693c8d76f8926c13d6d1b707d9ce0947c94d6b5c08b6bd8e986075`, PaymentIntent `pi_3UfVh0COtiY7WH741iX0kmXv`, charge `py_3UfVh0COtiY7WH741StzisRS`, event `evt_3UfVh0COtiY7WH741zEXjseF`, refund `pyr_1UfVlrCOtiY7WH74qRqwM81x` |
+
+What it showed:
+
+- At startup the deposit address `cda_1Uf3uGCOtiY7WH748kv7z8ec` was found among the account's own, with pathUSD in `supported_tokens`, and the 402 offered `stripe` and `tempo`.
+- Run 1: the transfer was broadcast and checked, the purchase stayed `paid` and the answer was `202` pending with the hash, balance 0, because the PaymentIntent was still `processing`. It `succeeded` about 10 seconds later; its charge's `payment_method_details.crypto` names `network: tempo`, `token_currency: usdc` and the same `transaction_hash`, which is what the credit is matched on. Posting the real event credited the pack (`paid` to `credited`, balance 0 to 5,000); the same event again answered `duplicate`. (The script then stopped on a bug of its own reading the event, since fixed.)
+- Run 2: Stripe answered `succeeded` at once, so the request itself credited the pack (`200`, 5,000). The real event then answered `already_credited`. The same credential, sent again after the challenge had expired, answered `200` with `already_credited: true`, not a new 402.
+- `refund-credit --yes` took back the 5,000 credits, fixed the amount at $19.00, and Stripe's refund was `pending`; the command said so instead of calling it done. Run again 10 seconds later, it found that refund in Stripe (`succeeded`), adopted it and made no second one: one refund on the PaymentIntent.
+
+Not run here: a broadcast whose answer is lost (tested against a fake chain only), a push-mode credential against the real chain, a second transfer for one challenge on the real chain, Stripe answering 5xx, and anything in live mode.
