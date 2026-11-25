@@ -212,13 +212,19 @@ def test_authorization_server_metadata(oc):
 
 
 def test_registration_is_stateless_and_echoes_the_client(oc, store):
-    before = stored_text(store)
+    from calotype.storage import FunnelDay, current_day
+
+    before = stored_text(store, funnel=False)
     body = register(oc, grant_types=["authorization_code", "refresh_token"], response_types=["code"])
     assert body["client_id"].startswith("c1.") and body["client_name"] == "Claude"
     assert body["redirect_uris"] == [CB]
     assert body["token_endpoint_auth_method"] == "none" and "client_secret" not in body
     assert body["grant_types"] == ["authorization_code"]
-    assert stored_text(store) == before  # nothing was written
+    # The one write is the funnel's oauth_probe count, made on the funnel's own thread after the
+    # response (funnel.py). Wait for it, so it cannot land between the two reads of the store.
+    oc.app.state.funnel.wait()
+    assert store.funnel_days([current_day()]) == [FunnelDay(current_day(), oauth_probe=1)]
+    assert stored_text(store, funnel=False) == before  # nothing about the client was written
 
 
 def test_registration_with_a_secret(oc):

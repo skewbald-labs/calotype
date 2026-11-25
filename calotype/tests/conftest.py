@@ -136,15 +136,21 @@ def store(request):
     return request.getfixturevalue(f"{request.param}_store")
 
 
-def stored_text(store) -> str:
-    """Everything the store has written, as one string, for privacy checks."""
+def stored_text(store, *, funnel: bool = True) -> str:
+    """Everything the store has written, as one string, for privacy checks.
+
+    ``funnel=False`` leaves out the funnel's daily counts, which funnel.py writes on its own
+    thread after a response: a test comparing the store before and after a request waits for
+    them (``app.state.funnel.wait()``) and checks them apart.
+    """
     if isinstance(store, SQLiteStorage):
         db = sqlite3.connect(store.path)
         try:
-            return "\n".join(db.iterdump())
+            return "\n".join(line for line in db.iterdump() if funnel or not line.startswith('INSERT INTO "funnel"'))
         finally:
             db.close()
-    docs = [{"path": d.reference.path, **d.to_dict()} for c in store.collections() for d in c.stream()]
+    docs = [{"path": d.reference.path, **d.to_dict()} for c in store.collections()
+            if funnel or not c.id.endswith("funnel") for d in c.stream()]
     return json.dumps(docs, default=str)
 
 

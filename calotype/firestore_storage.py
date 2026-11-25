@@ -569,12 +569,21 @@ class FirestoreStorage:
         """Claim ``claim`` for ``owner``, atomically. True if it was free or is already ``owner``'s."""
         ref = self._claim_ref(claim)
         now = datetime.now(UTC).isoformat(timespec="seconds")
-        try:
-            ref.create({"claim": claim, "owner": owner, "value": value, "created_at": now})
-            return True
-        except AlreadyExists:
-            snap = ref.get()
-            return snap.exists and snap.get("owner") == owner
+        for attempt in range(6):
+            try:
+                ref.create({"claim": claim, "owner": owner, "value": value, "created_at": now})
+                return True
+            except AlreadyExists:
+                snap = ref.get()
+                return snap.exists and snap.get("owner") == owner
+            except Aborted:
+                # Parallel creates of one document contend for its lock (as in
+                # mark_event_processed). If another caller's create won, it owns the claim.
+                snap = ref.get()
+                if snap.exists:
+                    return snap.get("owner") == owner
+                time.sleep(0.05 * (2**attempt))
+        raise Aborted(f"could not claim {claim} after retries")
 
     def get_payment_claim(self, claim: str) -> tuple[str, str] | None:
         """(owner, value) of a claim, or None."""
