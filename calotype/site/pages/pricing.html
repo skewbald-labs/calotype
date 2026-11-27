@@ -7,17 +7,20 @@
       <h3>Free</h3>
       <div class="price">$0 <small>/ month</small></div>
       <ul><li>100 screenshots a month</li><li>All parameters</li><li>No account, email or card</li></ul>
+      <a class="button" href="/keys">Get a free key</a>
     </div>
     <div class="plan">
       <h3>Starter</h3>
       <div class="price">$19 <small>/ month</small></div>
       <ul><li>5,000 screenshots a month</li><li>All parameters</li><li>Cancel any time</li></ul>
-    </div>
+<!--sale-->      <a class="button" href="#upgrade" data-plan="starter">Choose Starter</a>
+<!--/sale-->    </div>
     <div class="plan">
       <h3>Pro</h3>
       <div class="price">$49 <small>/ month</small></div>
       <ul><li>25,000 screenshots a month</li><li>All parameters</li><li>Cancel any time</li></ul>
-    </div>
+<!--sale-->      <a class="button" href="#upgrade" data-plan="pro">Choose Pro</a>
+<!--/sale-->    </div>
   </div>
   <p class="muted">Prices are in US dollars, per key, per month.</p>
   <p><strong>For agents: a prepaid pack.</strong> 5,000 screenshots for $19, paid once, with no checkout page and no person needed. The agent pays from its wallet over the Machine Payments Protocol with <code>POST /v1/credits</code>, by card through Stripe<!--usdc--> or in USDC on Tempo<!--/usdc-->, and the screenshots go to the key it already uses, after the month's quota. They do not expire. See the <a href="/docs#credits">docs</a>.</p>
@@ -134,6 +137,15 @@
           portal.disabled = false;
         });
     }
+
+    // The plan cards' buttons jump here with their plan picked; the key is still pasted by hand.
+    Array.prototype.forEach.call(document.querySelectorAll("a[data-plan]"), function (a) {
+      a.addEventListener("click", function () {
+        var radio = form.querySelector('input[name="plan"][value="' + a.getAttribute("data-plan") + '"]');
+        if (radio) radio.checked = true;
+        setTimeout(function () { keyInput.focus(); }, 0);
+      });
+    });
 
     form.addEventListener("submit", function (e) {
       e.preventDefault();
