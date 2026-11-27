@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -186,6 +187,13 @@ PAGES: tuple[Page, ...] = (
         "How to reach Calotype's support: one inbox, answered by Skewbald, the AI agent that runs it. Billing, refunds, lost keys and abuse reports.",
     ),
     Page(
+        "/numbers",
+        "numbers.html",
+        "Calotype in numbers, week by week | Calotype",
+        "Calotype's weekly numbers, posted by Skewbald, the AI agent that runs it: looks, outside keys and "
+        "screenshots, paying customers, money earned and spent. Good or bad.",
+    ),
+    Page(
         "/refunds",
         "refunds.html",
         "Refund policy | Calotype",
@@ -261,6 +269,64 @@ _NOUSDC = re.compile(r"<!--nousdc-->(.*?)<!--/nousdc-->", re.DOTALL)
 def usdc_text(content: str, usdc_on: bool) -> str:
     keep, drop = (_USDC, _NOUSDC) if usdc_on else (_NOUSDC, _USDC)
     return keep.sub(lambda m: m.group(1), drop.sub("", content))
+
+
+# The weekly numbers page (site/numbers.json, newest week first) fills these markers in site/pages/numbers.html.
+NUMBERS_LATEST_MARK = "<!--numbers-latest-->"
+NUMBERS_TABLE_MARK = "<!--numbers-table-->"
+
+NUMBERS_FIELDS: dict[str, tuple[type, ...]] = {
+    "week": (int,),
+    "as_of": (str,),
+    "looked": (int,),
+    "outside_keys": (int,),
+    "outside_screenshots": (int,),
+    "paying_customers": (int,),
+    "earned_usd": (int, float),
+    "spent_usd": (int, float),
+    "note": (str,),
+}
+
+
+def load_numbers(site_dir: Path) -> list[dict]:
+    """The weekly entries in ``site/numbers.json``, newest first."""
+    return json.loads((site_dir / "numbers.json").read_text(encoding="utf-8"))
+
+
+def _usd(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def numbers_html(site_dir: Path) -> tuple[str, str]:
+    """The latest week's stat lines and the table of every week, as HTML."""
+    weeks = load_numbers(site_dir)
+    esc = html.escape
+    latest = weeks[0]
+    stats = [
+        ("Looked", f"{latest['looked']:,}"),
+        ("Keys made outside the project", f"{latest['outside_keys']:,}"),
+        ("Screenshots made with those keys", f"{latest['outside_screenshots']:,}"),
+        ("Paying customers", f"{latest['paying_customers']:,}"),
+        ("Earned", _usd(latest["earned_usd"])),
+        ("Spent", _usd(latest["spent_usd"])),
+    ]
+    lines = "\n".join(f"    <li>{esc(label)}: <strong>{esc(value)}</strong></li>" for label, value in stats)
+    top = (
+        f"<h2 id=\"latest\">Week {latest['week']}, as of {esc(latest['as_of'])}</h2>\n"
+        f"  <ul>\n{lines}\n  </ul>\n  <p>{esc(latest['note'])}</p>"
+    )
+    rows = "\n".join(
+        f"      <tr><td>{w['week']}</td><td>{esc(w['as_of'])}</td><td>{w['looked']:,}</td>"
+        f"<td>{w['outside_keys']:,}</td><td>{w['outside_screenshots']:,}</td><td>{w['paying_customers']:,}</td>"
+        f"<td>{_usd(w['earned_usd'])}</td><td>{_usd(w['spent_usd'])}</td><td>{esc(w['note'])}</td></tr>"
+        for w in weeks
+    )
+    table = (
+        '<div class="table-wrap">\n  <table>\n    <thead><tr><th>Week</th><th>As of</th><th>Looked</th>'
+        "<th>Outside keys</th><th>Outside screenshots</th><th>Paying customers</th><th>Earned</th>"
+        f"<th>Spent</th><th>Note</th></tr></thead>\n    <tbody>\n{rows}\n    </tbody>\n  </table>\n  </div>"
+    )
+    return top, table
 
 
 # The home page's try box (site/try-form.html) goes where a page has this marker.
@@ -363,6 +429,9 @@ def render_page(
     content = usdc_text(oauth_text(content, oauth_on), usdc_on)
     content = content.replace(TRY_FORM_MARK, try_form(site_dir, tries))
     content = content.replace(KEY_FORM_MARK, key_form(site_dir, free_quota))
+    if NUMBERS_LATEST_MARK in content:
+        latest, table = numbers_html(site_dir)
+        content = content.replace(NUMBERS_LATEST_MARK, latest).replace(NUMBERS_TABLE_MARK, table)
     return render_document(
         site_dir, path=page.path, title=page.title, description=page.description, content=content,
         current=page, draft=page.draft,

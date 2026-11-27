@@ -32,8 +32,12 @@ Status: first version, run locally only. Not deployed. No domain. Stripe billing
 | `install_links.py` | Builds the one-click Cursor and VS Code install links in the README and on `/agents`; `python -m calotype.install_links` prints them with their decoded configs |
 | `plans.json` | Plans and monthly quotas, and the prepaid packs (`credit_packs`). Prices are provisional |
 | `adblock_domains.txt` | Domains blocked when `block_ads=true` |
-| `pages.py`, `site/` | The public website: `site/layout.html` (shared header and footer) wraps each page in `site/pages/`; `pages.py` lists the routes (`/`, `/docs`, `/pricing`, `/acceptable-use`, `/privacy`, `/terms`, `/refunds`) and serves them with `/robots.txt`, `/sitemap.xml` and `/llms.txt` (from `site/llms.txt`), the logo files in `site/brand/` at `/icon.svg` and `/icon.png`, and `site/images/` at `/images/<name>` (the README links there, so add a new name rather than replacing a file) |
+| `pages.py`, `site/` | The public website: `site/layout.html` (shared header and footer) wraps each page in `site/pages/`; `pages.py` lists the routes (`/`, `/docs`, `/pricing`, `/acceptable-use`, `/privacy`, `/terms`, `/refunds`, `/numbers`) and serves them with `/robots.txt`, `/sitemap.xml` and `/llms.txt` (from `site/llms.txt`), the logo files in `site/brand/` at `/icon.svg` and `/icon.png`, and `site/images/` at `/images/<name>` (the README links there, so add a new name rather than replacing a file) |
 | `tests/` | pytest suite |
+
+### Weekly numbers (`/numbers`)
+
+`site/numbers.json` holds one entry per week, newest first; `pages.py` renders the page from it at startup (no database, no script). To add a week: put a new entry at the top of the list (every field in the first entry, `week` one higher, `as_of` later; keys, screenshots, earned and spent are cumulative), run the tests (`tests/test_numbers.py` checks the file's shape), and deploy.
 
 ## Run locally
 

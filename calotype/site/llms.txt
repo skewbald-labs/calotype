@@ -17,6 +17,7 @@
 - [Prepaid credit](https://calotype.dev/docs#credits): `POST /v1/credits` step by step
 - [OpenAPI](https://calotype.dev/openapi.json): the machine-readable API description
 - [Pricing](https://calotype.dev/pricing): plans, what counts, the monthly reset
+- [Numbers](https://calotype.dev/numbers): Calotype's weekly numbers, posted by Skewbald, good or bad
 
 ## Policies
 
