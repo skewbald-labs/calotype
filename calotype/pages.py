@@ -303,7 +303,7 @@ def numbers_html(site_dir: Path) -> tuple[str, str]:
     esc = html.escape
     latest = weeks[0]
     stats = [
-        ("Looked", f"{latest['looked']:,}"),
+        ("Looked (MCP handshakes and requests, mostly directory bots)", f"{latest['looked']:,}"),
         ("Keys made outside the project", f"{latest['outside_keys']:,}"),
         ("Screenshots made with those keys", f"{latest['outside_screenshots']:,}"),
         ("Paying customers", f"{latest['paying_customers']:,}"),
