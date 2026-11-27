@@ -117,6 +117,7 @@ bearer_token_env_var = "CALOTYPE_KEY"</code></pre>
     <li>Authentication: <strong>Bearer Auth</strong>, with a new credential that holds your key</li>
   </ul>
   <p>n8n keeps the key in its encrypted credential store, not in the workflow. For a plain workflow step with no agent, and for error handling, see the guide to <a href="/guides/n8n-screenshot-workflow">a screenshot step in n8n</a>.</p>
+  <p><strong>The agent does not see the picture.</strong> Tested 27 November 2026 with n8n 2.49.8: the tool call works, but n8n passes the image to the model as base64 text. When a model has to look at the page, use the HTTP Request node and a model step that takes images, as in <a href="/guides/n8n-screenshot-workflow#mcp-tool">the guide</a>.</p>
 
   <h3 id="other">Other clients</h3>
   <p>Any client that takes a server address and a custom header works. It needs three things:</p>

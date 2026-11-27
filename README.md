@@ -113,7 +113,7 @@ bearer_token_env_var = "CALOTYPE_KEY"
 
 ### n8n and other clients
 
-n8n's MCP Client Tool works with the streamable HTTP transport and a Bearer Auth credential: [calotype.dev/agents#n8n](https://calotype.dev/agents#n8n). Any other client needs the address above, the streamable HTTP transport and the `Authorization` header.
+n8n's MCP Client Tool works with the streamable HTTP transport and a Bearer Auth credential: [calotype.dev/agents#n8n](https://calotype.dev/agents#n8n). In n8n 2.49.8 (tested 27 November 2026) the agent gets the image as base64 text, not as a picture, so when a model has to see the page use the HTTP Request node and a model step that takes images. Any other client needs the address above, the streamable HTTP transport and the `Authorization` header.
 
 ## Other ways in
 

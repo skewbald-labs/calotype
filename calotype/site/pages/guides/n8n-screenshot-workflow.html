@@ -24,7 +24,8 @@
     <thead><tr><th>You want</th><th>Use</th><th>The image arrives as</th></tr></thead>
     <tbody>
       <tr><td>A fixed step: "capture this address, then send it somewhere"</td><td>HTTP Request node</td><td>A binary file on the item</td></tr>
-      <tr><td>An AI Agent that decides when to look at a page</td><td>MCP Client Tool, attached to the agent</td><td>A tool result handed to the agent</td></tr>
+      <tr><td>A model that has to see the page (a review, a comparison, a question about the picture)</td><td>HTTP Request node, then a model step that takes images</td><td>A binary file the model sees as an image</td></tr>
+      <tr><td>An AI Agent that decides when to capture a page, without having to see it</td><td>MCP Client Tool, attached to the agent</td><td>Text: in n8n 2.49.8 the image reaches the model as base64 text, not as a picture (see below)</td></tr>
       <tr><td>An MCP tool call as an ordinary step</td><td>MCP Client node</td><td>A binary file on the item</td></tr>
     </tbody>
   </table>
@@ -82,9 +83,10 @@
   </ul>
   <p>The <code>?ref=</code> tag only tells Calotype that this guide brought the key; the endpoint works the same without it.</p>
   <p><strong>The version matters.</strong> Calotype speaks the streamable HTTP transport only. n8n's release notes list "MCP Client Tool Node: Add support for HTTP Streamable Transport" under version 1.104.0, released on 21 July 2025. Before that release the node spoke only the older SSE transport, so it cannot connect to Calotype. In n8n's current source, the other choice in the list is labelled "Server Sent Events (Deprecated)".</p>
-  <p><strong>What I have not verified.</strong> n8n's source shows the node handing the tool's result content to the agent. Calotype's result is an image plus one line of text. Whether your chat model then receives that image as a picture it can see depends on the model and on your n8n version, and I have not tested it in n8n. Check it with a question that can only be answered from the image:</p>
+  <p><strong>Tested on 27 November 2026: the model does not see the image.</strong> With n8n 2.49.8, the AI Agent node 3.1 and the MCP Client Tool 1.2, the call to Calotype works, but n8n turns the tool's result into one text string before it reaches the model: the image arrives as about 112,000 characters of base64, not as a picture. Asked about the page, the model (Gemini on Vertex AI in the test) described a page it had not seen, with the wrong colours. The conversion happens in n8n, before the chat model, so other models are likely to get the same text; only Gemini was tested.</p>
+  <p>So use the MCP Client Tool only when the agent needs to capture a page without looking at it, for example to file the screenshot somewhere. When a model has to see the page, fetch the image with the HTTP Request node and give the binary file to a model step that takes images. The template <a href="https://n8n.io/workflows/23285">Watch web pages for visual changes with Calotype and email digests</a> works that way. A quick check for a newer n8n, with a question only the image can answer:</p>
 <pre><code>Take a dark-mode screenshot of https://calotype.dev/pricing and tell me the Starter price.</code></pre>
-  <p>If the agent answers $19, it saw the page. If it cannot, use the HTTP Request node to fetch the image and give the binary file to a model step that takes images. That path does not depend on how tool results are passed along.</p>
+  <p>If the agent answers $19 and describes the page correctly, your version passes images through.</p>
 
   <h2 id="mcp-node">The MCP Client node, as a plain step</h2>
   <p>n8n also has an <strong>MCP Client</strong> node that calls an MCP tool as a regular workflow step, with no agent. Its documentation lists the same transport and authentication settings, a <strong>Tool</strong> field that is filled from the server, and an option named <strong>Convert to Binary</strong>, which turns images in the result into binary data. For Calotype it does the same job as the HTTP Request node. Use whichever you find clearer; the HTTP route gives you the response headers as well.</p>
